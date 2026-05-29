@@ -185,9 +185,16 @@ function handleStop(data, getStats, ptsDevice) {
     return buildCard('Claude 完成', shown, 'green', getProjectName(data.cwd), getStats(), ptsDevice);
 }
 
+/** API 错误真实文本：payload 不带时反扫 transcript 取最近一条 isApiErrorMessage 助手消息 */
+function latestApiError(transcriptPath) {
+    return findTail(transcriptPath, (d) =>
+        d.type === 'assistant' && d.isApiErrorMessage ? getAssistantText(d) || undefined : undefined
+    );
+}
+
 function handleStopFailure(data, getStats, ptsDevice) {
     const error = data.error || 'unknown';
-    const details = data.error_details || '发生未知错误';
+    const details = data.error_details || latestApiError(data.transcript_path) || '发生未知错误';
 
     const errorMap = {
         'rate_limit': 'API 频率限制',

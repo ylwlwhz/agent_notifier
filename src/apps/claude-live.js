@@ -313,7 +313,7 @@ async function flushBuffer(bufferPath) {
     const cards = existing && existing.turnTs === turnTs ? (existing.cards || []) : [];
     for (let i = 0; i < withTools.length; i++) {
         const card = buildSegmentCard(withTools[i], projectName, capture);
-        const sig = hashStr(JSON.stringify(card.elements));
+        const sig = hashStr(JSON.stringify(card.body.elements));
         const slot = cards[i];
         if (slot?.message_id) {
             if (slot.sig === sig) continue; // 内容没变 → 免一次 patch

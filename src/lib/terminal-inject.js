@@ -268,9 +268,16 @@ function injectViaTmux(target, keys) {
         else parts.push(shellQuote(ch));
     }
 
-    const cmd = `tmux send-keys -t ${shellQuote(target)} ${parts.join(' ')}`;
+    const q = shellQuote(target);
     try {
-        execSync(cmd, { timeout: 5000, stdio: 'pipe' });
+        // 末尾 Enter 拆开 + 隔 60ms 单独发：否则长文本+Enter 整块涌入被 Claude TUI 当粘贴、Enter 变换行不提交
+        const submit = parts.length > 1 && parts[parts.length - 1] === 'Enter';
+        if (submit) parts.pop();
+        if (parts.length) execSync(`tmux send-keys -t ${q} ${parts.join(' ')}`, { timeout: 5000, stdio: 'pipe' });
+        if (submit) {
+            execSync('sleep 0.06');
+            execSync(`tmux send-keys -t ${q} Enter`, { timeout: 5000, stdio: 'pipe' });
+        }
         return true;
     } catch (err) {
         throw new Error(`tmux send-keys failed: ${err.message}`);

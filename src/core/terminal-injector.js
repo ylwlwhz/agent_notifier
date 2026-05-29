@@ -19,9 +19,9 @@ function createTerminalInjector({ injectText }) {
             const normalized = normalizeResponse(response);
 
             if (normalized.responseType === 'text') {
-                // 3×Ctrl-U 清 input 残留，避免拼接上次未提交内容
-                const CLEAR = '\x15'.repeat(3);
-                return injectText(target, `${CLEAR}${normalized.value}\r`);
+                // C-u×3 清空单独发一次：与文字同批会被当粘贴吞掉、清不了。文字+Enter 交给 injectViaTmux（内部拆 Enter）
+                await injectText(target, '\x15'.repeat(3));
+                return injectText(target, `${normalized.value}\r`);
             }
 
             if (normalized.responseType === 'approve') {
