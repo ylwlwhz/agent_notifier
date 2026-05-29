@@ -41,7 +41,7 @@ async function announceReady() {
     if (!appId || !appSecret || !RL_CHAT_ID) return;
     try {
         const Lark = require('@larksuiteoapi/node-sdk');
-        const { card2, inputEl, escButton } = require('../lib/card');
+        const { card2, inputEl, escFooterRow } = require('../lib/card');
         const { SessionState } = require('../lib/session-state');
         const stateKey = `feishu_${RL_NAME}_${Date.now()}`;
         new SessionState().addNotification(stateKey, {
@@ -51,9 +51,9 @@ async function announceReady() {
         const card = card2({
             template: 'green', title: `已启动 · ${RL_HOST}:${RL_PROJ}`,
             elements: [
-                { tag: 'markdown', content: `<font color='grey'>${RL_NAME}</font>\n在下方直接发指令给它` },
+                { tag: 'markdown', content: '在下方直接发指令给它' },
                 inputEl(stateKey, '给新会话发指令...'),
-                escButton(stateKey),
+                escFooterRow(stateKey, `tmux:${RL_NAME}`), // 中断 + 右侧终端 id
             ],
         });
         await new Lark.Client({ appId, appSecret }).im.message.create({

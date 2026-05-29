@@ -118,7 +118,6 @@ function buildMultiSelectCard(notification, stateKey) {
     const options = notification._ms_options || [];
     const question = notification._question || '';
     const contextText = notification._context_text || '';
-    const noteParts = notification._note_parts || '';
 
     const elements = [];
 
@@ -126,22 +125,27 @@ function buildMultiSelectCard(notification, stateKey) {
         elements.push(...parseMarkdownToElements(contextText));
         elements.push({ tag: 'hr' });
     }
+    if (question) elements.push({ tag: 'markdown', content: question });
 
-    // 问题 + 编号列表（含 Other）
-    const optList = options.map((opt, i) => `**${i + 1}.** ${opt}`).join('\n');
-    const otherNum = options.length + 1;
-    elements.push({ tag: 'markdown', content: `${question}\n\n${optList}\n**${otherNum}.** Other（自定义文本）\n\n输入编号（空格分隔），选 Other 加冒号写文本：\n如 \`1 3\` 或 \`1 ${otherNum}:我的文本\`` });
-
-    // 输入框（schema 2.0：直接入 body，无 action 容器）
+    // 原生多选下拉 + Other 自定义输入 + 提交，form 一次打包（回调 action.form_value.sel / .other）
     elements.push({
-        tag: 'input', name: 'multi_select_input',
-        placeholder: { tag: 'plain_text', content: `如 1 3 或 1 ${otherNum}:自定义文本` },
-        value: { action_type: 'submit_multi', session_state_key: stateKey },
+        tag: 'form', name: 'ms_form',
+        elements: [
+            {
+                tag: 'multi_select_static', name: 'sel',
+                placeholder: { tag: 'plain_text', content: '点击勾选（可多选）' },
+                options: options.map((opt, i) => ({ value: String(i), text: { tag: 'plain_text', content: opt } })),
+            },
+            { tag: 'input', name: 'other', placeholder: { tag: 'plain_text', content: '其他（自定义文本，可选）' } },
+            {
+                tag: 'button', text: { tag: 'plain_text', content: '✅ 提交' }, type: 'primary',
+                action_type: 'form_submit', name: 'submit',
+                value: { action_type: 'submit_multi', session_state_key: stateKey },
+            },
+        ],
     });
 
-    if (noteParts) elements.push({ tag: 'markdown', content: noteParts });
-
-    return require('./card').card2({ template: 'orange', icon: '', title: '多选', elements });
+    return require('./card').card2({ template: 'orange', icon: 'list_outlined', title: '多选', elements });
 }
 
 module.exports = { parseMarkdownToElements, buildFeishuTable, buildMultiSelectCard };

@@ -16,7 +16,7 @@ const { injectKeys, injectText } = require('../lib/terminal-inject');
 const { createFeishuClient } = require('../channels/feishu/feishu-client');
 const { createFeishuInteractionHandler } = require('../channels/feishu/feishu-interaction-handler');
 const { createCodexInputBridge } = require('../adapters/codex/cli-input-bridge');
-const { selectCard, card2, inputEl, escButton } = require('../lib/card');
+const { selectCard, card2, inputEl, escFooterRow } = require('../lib/card');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const launcher = require('./launcher');
 const { buildCompletionCard } = require('../lib/completion-card');
@@ -184,34 +184,17 @@ class FeishuListener {
             }
         }
 
-        // ── 多选卡片：输入框提交（必须在通用 input 处理之前） ──
+        // ── 原生多选 form 提交（必须在通用 input 处理之前） ──
         if (action_type === 'submit_multi') {
-            const inputText = (action.input_value || '').trim();
-            if (!inputText) return '请输入选项编号';
-
+            const fv = action.form_value || {};
             const total = notification._ms_total || (notification._ms_options || []).length;
-            const otherNum = total + 1; // Other 的 1-indexed 编号
-
-            // 解析输入：支持 "1 3" 或 "1 4:自定义文本"
-            // 先提取 Other 文本（格式：otherNum:文本 或 otherNum：文本）
-            let otherText = null;
-            const otherMatch = inputText.match(new RegExp(`${otherNum}[:：](.+)`));
-            if (otherMatch) {
-                otherText = otherMatch[1].trim();
-            }
-
-            // 提取所有编号
-            const nums = inputText.split(/[\s,，、]+/).map(s => parseInt(s, 10)).filter(n => !isNaN(n));
-            if (nums.length === 0) return '请输入有效的选项编号';
-
-            // 转为 0-indexed：选项 0..total-1，Other = total
-            const selectedSet = new Set(nums.map(n => n - 1).filter(i => i >= 0 && i <= total));
-            // 如果有 otherText，确保 Other 被选中
-            if (otherText) selectedSet.add(total - 1 + 1); // Other index = total (0-indexed)
-            // 过滤：正常选项 0..total-1，Other = total
+            // form_value.sel = 勾选的选项索引数组；form_value.other = Other 自定义文本
+            const selectedSet = new Set((fv.sel || []).map(Number).filter(n => n >= 0 && n < total));
+            const otherText = (fv.other || '').trim() || null;
+            if (otherText) selectedSet.add(total); // Other 槽 = total（0-indexed）
             const hasOther = selectedSet.has(total);
 
-            if (selectedSet.size === 0) return `请输入有效的选项编号（1 到 ${otherNum}）`;
+            if (selectedSet.size === 0) return '请至少勾选一项';
 
             console.log(`[feishu-listener] submit_multi → selected:`, [...selectedSet], 'total:', total, 'hasOther:', hasOther, 'otherText:', otherText);
 
@@ -268,11 +251,9 @@ class FeishuListener {
                     await injectKeys(notification.pts_device, action.input_value.trim());
                     console.log(`[feishu-listener] 已注入按键到 ${notification.pts_device}: ${action.input_value.trim()}`);
                 } else {
-                    // 普通文本输入：含回车
-                    // 如果有 _other_num 且 Other 按钮尚未被点击，先注入 Other 序号
+                    // 自定义答案：用 _other_num 把光标移到「Type something」，再注入文本（= 走 Other）
                     const otherMeta = notification.responses?.['_other_num'];
-                    const otherAlreadyClicked = notification._other_clicked;
-                    if (otherMeta && !otherAlreadyClicked) {
+                    if (otherMeta) {
                         await injectKeys(notification.pts_device, otherMeta.keys);
                         await this.sleep(500);
                     }
@@ -323,15 +304,8 @@ class FeishuListener {
             return '已开启全局允许，后续权限自动批准';
         }
 
-        // Other 按钮保留 notification 等待输入框
-        // 多问题模式按钮：删除并发下一题
-        // 普通卡片按钮（esc/allow 等）：保留以支持多次操作
-        if (action_type === 'opt_other') {
-            notification._other_clicked = true;
-            this.state.load();
-            this.state.data[session_state_key] = notification;
-            this.state.save();
-        } else if (notification._all_questions) {
+        // 多问题模式按钮：删除并发下一题；普通卡片按钮（esc/allow 等）：保留以支持多次操作
+        if (notification._all_questions) {
             this.state.removeNotification(session_state_key);
             this.sendNextQuestion(notification, session_state_key).catch(err =>
                 console.error('[feishu-listener] 发送下一题失败:', err.message));
@@ -452,9 +426,9 @@ class FeishuListener {
         await this.sendCardJson(chatId, card2({
             template: 'green', title: `已启动 · ${label}`,
             elements: [
-                { tag: 'markdown', content: `<font color='grey'>${name}</font>\n在下方直接发指令给它` },
+                { tag: 'markdown', content: '在下方直接发指令给它' },
                 inputEl(stateKey, '给新会话发指令...'),
-                escButton(stateKey),
+                escFooterRow(stateKey, `tmux:${name}`), // 中断 + 右侧终端 id
             ],
         }));
     }
@@ -479,7 +453,6 @@ class FeishuListener {
         const questions = notification._all_questions;
         const nextIdx = (notification._current_q || 0) + 1;
         const chatId = notification._chat_id;
-        const noteParts = notification._note_parts || '';
         const totalQ = questions.length;
 
         if (!chatId) return;
@@ -498,8 +471,7 @@ class FeishuListener {
             q.options.forEach((opt, optIdx) => {
                 qResponses[`opt_${optIdx}`] = { keys: ARROW_DOWN.repeat(optIdx) + '\r', label: opt.label };
             });
-            qResponses['opt_other'] = { keys: ARROW_DOWN.repeat(otherIdx) + '\r', label: 'Other' };
-            qResponses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx) + '\r', label: '_meta' };
+            qResponses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx), label: '_meta' };
             qResponses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
 
             // 保存 state（沿用多问题元数据）
@@ -512,7 +484,6 @@ class FeishuListener {
                 _all_questions: questions,
                 _current_q: nextIdx,
                 _chat_id: chatId,
-                _note_parts: noteParts,
             });
 
             // 发送卡片（schema 2.0，与 claude-ask 同款 selectCard）
@@ -520,7 +491,7 @@ class FeishuListener {
                 title: `${q.header || '选择'} (${nextIdx + 1}/${totalQ})`,
                 question: q.question || '',
                 options: q.options.map(o => o.label),
-                stateKey: newStateKey, noteParts,
+                stateKey: newStateKey, ptsDevice: notification.pts_device,
                 mdToEls: parseMarkdownToElements,
             });
 
@@ -539,7 +510,7 @@ class FeishuListener {
             const doneCard = card2({
                 template: 'green',
                 title: `全部已回答 (${totalQ} 题)`,
-                elements: [{ tag: 'markdown', content: noteParts }],
+                elements: [{ tag: 'markdown', content: '答案已全部提交' }],
             });
 
             try {

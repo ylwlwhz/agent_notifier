@@ -15,7 +15,6 @@ const { sessionState } = require('../lib/session-state');
 const { resolvePtsDevice } = require('../lib/terminal-inject');
 const Lark = require('@larksuiteoapi/node-sdk');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
-const { buildCardFooter } = require('../lib/card-footer');
 const { card2, statsTags, inputEl, buttonRow, footer, escFooterRow } = require('../lib/card');
 const { forEachTail, findTail, getAssistantText } = require('../lib/transcript-utils');
 const { fmtDuration, readOfficialStats } = require('../lib/session-stats');
@@ -320,7 +319,7 @@ function buildPermissionButtons(parsedOptions) {
 }
 
 /** bypass 下 PreToolUse 不触发，从 transcript 检测 AskUserQuestion 并委托 claude-ask 发选择卡。已处理返 true */
-async function tryAskUserQuestion(app, data, { projectName, sessionPrefix, sessionId }) {
+async function tryAskUserQuestion(app, data, { sessionPrefix, sessionId }) {
     const askInput = extractAskUserQuestion(data.transcript_path);
     const questions = Array.isArray(askInput?.questions) ? askInput.questions : [];
     if (!questions.length) return false;
@@ -329,14 +328,13 @@ async function tryAskUserQuestion(app, data, { projectName, sessionPrefix, sessi
     questions.forEach(q => { q._contextText = askInput._contextText || ''; });
     const ptsDevice = resolvePtsDevice(process.ppid);
     const stateKey = `feishu_ask_${sessionPrefix}_${Date.now()}`;
-    const noteParts = buildCardFooter({ host: 'claude', ptsDevice, projectName }).content;
 
     if (questions.length > 1) {
-        await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, 'AskUserQuestion', noteParts);
+        await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, 'AskUserQuestion');
     } else if (questions[0].multiSelect) {
-        await sendMultiSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, 'AskUserQuestion', noteParts);
+        await sendMultiSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, 'AskUserQuestion');
     } else {
-        await sendSingleSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, 'AskUserQuestion', noteParts);
+        await sendSingleSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, 'AskUserQuestion');
     }
     return true;
 }
@@ -348,7 +346,6 @@ async function sendFeishuInteractiveCard(data, getStats) {
 
     const sessionId = data.session_id || '';
     const sessionPrefix = sessionId.substring(0, 8);
-    const projectName = getProjectName(data.cwd);
 
     // 30s 内 ask-handler（PreToolUse）已发过选择卡 → 跳过重复
     sessionState.load();
@@ -356,7 +353,7 @@ async function sendFeishuInteractiveCard(data, getStats) {
         .some(([k, v]) => k.startsWith(`feishu_ask_${sessionPrefix}`) && Date.now() - (v.created_at || 0) < 30000);
     if (hasRecentAsk) return;
 
-    if (await tryAskUserQuestion(app, data, { projectName, sessionPrefix, sessionId })) return;
+    if (await tryAskUserQuestion(app, data, { sessionPrefix, sessionId })) return;
 
     const ptsDevice = resolvePtsDevice(process.ppid);
     const stateKey = `feishu_${sessionPrefix}_${Date.now()}`;

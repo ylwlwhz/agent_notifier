@@ -17,7 +17,6 @@ const { envConfig } = require('../lib/env-config');
 const { sessionState } = require('../lib/session-state');
 const { resolvePtsDevice } = require('../lib/terminal-inject');
 const { buildMultiSelectCard, parseMarkdownToElements } = require('../lib/feishu-card-utils');
-const { buildCardFooter } = require('../lib/card-footer');
 const { selectCard } = require('../lib/card');
 
 // ── Utility functions ─────────────────────────────────────
@@ -111,7 +110,7 @@ async function getFeishuAppClient() {
 // ── Card senders ──────────────────────────────────────────
 
 /** Case A: single multi-select question */
-async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts) {
+async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType) {
     const notif = {
         session_id: sessionId,
         notification_type: notificationType,
@@ -124,7 +123,6 @@ async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notif
         _ms_total: q.options.length,
         _question: q.question || '',
         _context_text: q._contextText || '',
-        _note_parts: noteParts,
         _message_id: null,
     };
 
@@ -147,13 +145,13 @@ async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notif
 }
 
 /** Case B: single single-select question */
-async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts) {
+async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType) {
     const card = selectCard({
         title: q.header || '方案选择',
         contextText: q._contextText || '',
         question: q.question || '',
         options: q.options.map(o => o.label),
-        stateKey, noteParts,
+        stateKey, ptsDevice,
         mdToEls: parseMarkdownToElements,
     });
 
@@ -165,9 +163,9 @@ async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, noti
     q.options.forEach((opt, idx) => {
         responses[`opt_${idx}`] = { keys: ARROW_DOWN.repeat(idx) + '\r', label: opt.label };
     });
-    const otherIdx = q.options.length; // Other 是最后一项
-    responses['opt_other'] = { keys: ARROW_DOWN.repeat(otherIdx) + '\r', label: 'Other' };
-    responses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx) + '\r', label: '_meta' };
+    // 自定义答案：移到 Type something（不按 Enter，否则是空提交取消），文本由 injectText 打字+提交
+    const otherIdx = q.options.length;
+    responses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx), label: '_meta' };
     responses['esc'] = { keys: '\x1b', label: 'Esc' };
     responses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
 
@@ -193,7 +191,7 @@ async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, noti
 }
 
 /** Case C: multiple questions — send first, store all for listener */
-async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType, noteParts) {
+async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType) {
     const q = questions[0];
     const contextText = q._contextText || '';
     const ARROW_DOWN = '\x1b[B';
@@ -203,8 +201,7 @@ async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, s
     q.options.forEach((opt, optIdx) => {
         qResponses[`opt_${optIdx}`] = { keys: ARROW_DOWN.repeat(optIdx) + '\r', label: opt.label };
     });
-    qResponses['opt_other'] = { keys: ARROW_DOWN.repeat(otherIdx) + '\r', label: 'Other' };
-    qResponses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx) + '\r', label: '_meta' };
+    qResponses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx), label: '_meta' };
     qResponses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
 
     // Store all questions for listener
@@ -217,7 +214,6 @@ async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, s
         _all_questions: questions,
         _current_q: 0,
         _chat_id: app.chatId,
-        _note_parts: noteParts,
     });
 
     const qCard = selectCard({
@@ -225,7 +221,7 @@ async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, s
         contextText,
         question: q.question || '',
         options: q.options.map(o => o.label),
-        stateKey, noteParts,
+        stateKey, ptsDevice,
         mdToEls: parseMarkdownToElements,
     });
 
@@ -270,7 +266,6 @@ async function main() {
     if (!Array.isArray(questions) || questions.length === 0) return;
 
     const sessionId = data.session_id || '';
-    const cwd = data.cwd || '';
     const transcriptPath = data.transcript_path || '';
 
     const stateKey = `feishu_ask_${sessionId.substring(0, 8)}_${Date.now()}`;
@@ -283,26 +278,17 @@ async function main() {
     // Attach contextText to question objects for use in card builders
     questions.forEach(q => { q._contextText = contextText; });
 
-    // Build note parts (footer)
-    const projectName = getProjectName(cwd);
-    const footerEl = buildCardFooter({
-        host: 'claude',
-        ptsDevice,
-        projectName,
-    });
-    const noteParts = footerEl.content;
-
     if (questions.length > 1) {
         // Case C: multiple questions
-        await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType, noteParts);
+        await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType);
     } else {
         const q = questions[0];
         if (q.multiSelect) {
             // Case A: single multi-select
-            await sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts);
+            await sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType);
         } else {
             // Case B: single single-select
-            await sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts);
+            await sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType);
         }
     }
 }

@@ -54,18 +54,16 @@ function buttonRow(buttons, stateKey) {
     };
 }
 
-/** AskUserQuestion 选择卡：context + 问题 + 竖排选项按钮 + Other + 输入框 + ESC + footer。
+/** AskUserQuestion 选择卡：context + 问题 + 竖排选项按钮 + 输入框 + 中断·终端id 行。
  *  mdToEls = parseMarkdownToElements（由调用方传入，避免 card.js ↔ feishu-card-utils 循环依赖） */
-function selectCard({ template = 'orange', title, tags, contextText, question, options, stateKey, noteParts, mdToEls }) {
+function selectCard({ template = 'orange', title, tags, contextText, question, options, stateKey, ptsDevice, mdToEls }) {
     const els = [];
     if (contextText) { els.push(...mdToEls(contextText)); els.push({ tag: 'hr' }); }
     if (question) els.push(...mdToEls(question));
     options.forEach((label, i) => els.push({ tag: 'button', text: { tag: 'plain_text', content: label }, type: i === 0 ? 'primary' : 'default', value: { action_type: `opt_${i}`, session_state_key: stateKey } }));
-    els.push({ tag: 'button', text: { tag: 'plain_text', content: '💬 Other' }, type: 'default', value: { action_type: 'opt_other', session_state_key: stateKey } });
-    els.push(inputEl(stateKey, '输入自定义回答...'));
-    els.push(escButton(stateKey));
-    if (noteParts) els.push({ tag: 'markdown', content: noteParts });
-    return card2({ template, icon: '', title, tags, elements: els }); // 问题卡不挂图标（橙色 lock 是权限专用）
+    els.push(inputEl(stateKey, '其他：直接输入自定义答案…')); // 输入即走 Other，listener 自动先移到 Type something
+    els.push(escFooterRow(stateKey, ptsDevice)); // 中断按钮 + 右侧终端 id（仿 Stop 卡）
+    return card2({ template, icon: 'list_outlined', title, tags, elements: els }); // 清单图标贴「选项列表」语义
 }
 
 /** ptsDevice → 简短终端 id：去 tmux:/dev/ 前缀，裁默认窗格后缀 :0.0（session 名已唯一），
