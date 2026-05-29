@@ -21,43 +21,45 @@ const { forEachTail, findTail, getAssistantText } = require('../lib/transcript-u
 
 // ── 会话统计 ─────────────────────────────────────────────
 
+/** 时长 ms → 紧凑串（不到 1 分钟才显示秒，否则秒无意义） */
+function fmtDuration(ms) {
+    const total = Math.floor(ms / 1000);
+    const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
+    return h > 0 ? `${h}h${m}m` : m > 0 ? `${m}m` : `${s}s`;
+}
+
+/** 读 cost-capture.js 落盘的官方成本/时长；文件按完整 session_id 命名，多窗口互不干扰，无则 null */
+function readOfficialStats(sessionId) {
+    if (!sessionId) return null;
+    try {
+        const j = JSON.parse(fs.readFileSync(`/tmp/claude-cost-${sessionId}.json`, 'utf8'));
+        return {
+            costUSD: typeof j.cost === 'number' ? j.cost : null,
+            duration: typeof j.durationMs === 'number' ? fmtDuration(j.durationMs) : '',
+            contextPct: j.contextPct,
+            sessionName: j.sessionName,
+        };
+    } catch { return null; }
+}
+
 function parseSessionStats(transcriptPath) {
     if (!transcriptPath) return null;
     try {
         const raw = fs.readFileSync(transcriptPath, 'utf8').trim();
         if (!raw) return null;
-        const lines = raw.split('\n');
 
         const timestamps = [];
-        let inputTokens = 0;
-        let outputTokens = 0;
-        let cacheReadTokens = 0;
-        let cacheCreateTokens = 0;
-
-        for (const line of lines) {
+        for (const line of raw.split('\n')) {
             let d;
             try { d = JSON.parse(line); } catch { continue; }
             if (d.timestamp) timestamps.push(d.timestamp);
-            if (d.type === 'assistant') {
-                const usage = (d.message && d.message.usage) || {};
-                inputTokens += usage.input_tokens || 0;
-                outputTokens += usage.output_tokens || 0;
-                cacheReadTokens += usage.cache_read_input_tokens || 0;
-                cacheCreateTokens += usage.cache_creation_input_tokens || 0;
-            }
         }
 
-        let duration = '';
-        if (timestamps.length >= 2) {
-            const ms = new Date(timestamps[timestamps.length - 1]) - new Date(timestamps[0]);
-            const totalSec = Math.floor(ms / 1000);
-            const h = Math.floor(totalSec / 3600);
-            const m = Math.floor((totalSec % 3600) / 60);
-            const s = totalSec % 60;
-            duration = h > 0 ? `${h}h${m}m${s}s` : m > 0 ? `${m}m${s}s` : `${s}s`;
-        }
+        const duration = timestamps.length >= 2
+            ? fmtDuration(new Date(timestamps[timestamps.length - 1]) - new Date(timestamps[0]))
+            : '';
 
-        return { duration, inputTokens, outputTokens, cacheReadTokens, cacheCreateTokens };
+        return { duration };
     } catch {
         return null;
     }
@@ -136,9 +138,9 @@ function getProjectName(cwd) {
 
 // ── 卡片构建 ─────────────────────────────────────────────
 
-/** Stop / StopFailure 卡：时长/token 作 header 标签，正文为 body；输入框与 footer 由发送侧补 */
+/** Stop / StopFailure 卡：会话名作副标题，时长/成本等官方字段作 header 标签，正文为 body；输入框与 footer 由发送侧补 */
 function buildCard(title, body, template, stats) {
-    return card2({ template, title, tags: statsTags(stats), elements: parseMarkdownToElements(body) });
+    return card2({ template, title, subtitle: stats?.sessionName, tags: statsTags(stats), elements: parseMarkdownToElements(body) });
 }
 
 // ── 事件处理 ─────────────────────────────────────────────
@@ -405,10 +407,13 @@ async function main() {
 
     if (!envConfig.getFeishuAppConfig().enabled) return;
 
-    // 懒求值：只在确实发卡时才读全文算 stats，跳过路径（bypass / dedup）零开销
+    // 懒求值：优先用 statusLine 旁路落盘的官方成本/时长（与状态栏同源），无则回退 transcript 时长
     let statsVal, statsDone = false;
     const getStats = () => {
-        if (!statsDone) { statsVal = parseSessionStats(data.transcript_path); statsDone = true; }
+        if (!statsDone) {
+            statsVal = readOfficialStats(data.session_id) || parseSessionStats(data.transcript_path) || {};
+            statsDone = true;
+        }
         return statsVal;
     };
 

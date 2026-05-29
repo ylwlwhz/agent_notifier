@@ -3,8 +3,6 @@
 // schema 2.0 卡片构建公共件。交互组件的 value:{action_type,session_state_key} 结构与 1.0 一致，
 // listener 回调路由不受影响；2.0 取消了 action 容器，按钮改用 column_set 横排、输入框直接入 body。
 
-const { formatTokenCount } = require('./card-footer');
-
 // 各主题色默认图标（飞书 standard_icon token）
 const TEMPLATE_ICON = {
     green: 'yes_outlined',
@@ -24,12 +22,13 @@ function card2({ template, icon, title, subtitle, tags = [], elements }) {
     return { schema: '2.0', config: { wide_screen_mode: true }, header, body: { elements: elements.filter(Boolean) } };
 }
 
-/** 把 stats（时长 + token）转成 header 彩色标签，从 footer 上移过来避免重复 */
+/** stats（成本/上下文/时长，均来自 statusLine 官方字段）→ header 彩色标签 */
 function statsTags(stats, tagColor = 'grey') {
+    if (!stats) return [];
     const tags = [];
-    if (stats?.duration) tags.push({ text: `⏱ ${stats.duration}`, color: tagColor });
-    const out = formatTokenCount(stats?.outputTokens);
-    if (out) tags.push({ text: `📊 ${out} tok`, color: 'grey' });
+    if (stats.costUSD > 0) tags.push({ text: `$${stats.costUSD.toFixed(2)}`, color: 'grey' });
+    if (stats.contextPct != null) tags.push({ text: `🧠 ${stats.contextPct}%`, color: 'grey' });
+    if (stats.duration) tags.push({ text: `⏱ ${stats.duration}`, color: tagColor });
     return tags;
 }
 
