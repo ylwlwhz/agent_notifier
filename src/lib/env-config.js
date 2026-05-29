@@ -20,8 +20,8 @@ class EnvConfig {
      */
     loadEnvironmentVariables() {
         try {
-            // 加载项目根目录的 .env 文件
-            const envPath = path.join(__dirname, '..', '.env');
+            // __dirname = src/lib，.env 在仓库根
+            const envPath = path.join(__dirname, '..', '..', '.env');
 
             if (fs.existsSync(envPath)) {
                 require('dotenv').config({ path: envPath });

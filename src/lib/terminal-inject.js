@@ -37,23 +37,35 @@ function shellQuote(str) {
  *   { type: 'pts',  target: '/dev/pts/N' }
  *   null — 无法解析
  */
-function resolveTarget() {
+function resolveTarget(startPid) {
     // 策略 1: 显式环境变量
     const explicit = process.env.CLAUDE_TMUX_TARGET;
     if (explicit) return { type: 'tmux', target: explicit };
 
     // 策略 2: 沿进程树向上查找，同时检测 tmux 和 pts
-    let pid = process.pid;
+    let pid = startPid || process.pid;
     let ptsDevice = null;
+    const isDarwin = process.platform === 'darwin';
 
     for (let depth = 0; depth < 10; depth++) {
-        // 检查 fd/0 是否指向 pts
+        // Linux: 检查 fd/0 是否指向 pts
         try {
             const fd0 = fs.readlinkSync(`/proc/${pid}/fd/0`);
             if (fd0.startsWith('/dev/pts/') && !ptsDevice) {
                 ptsDevice = fd0;
             }
         } catch {}
+
+        // macOS: 无 /proc，用 ps -o tt= 拿控制 tty（s012/ttys012；无 tty 为 ?? / -）
+        if (isDarwin && !ptsDevice) {
+            try {
+                const tt = execSync(`ps -o tt= -p ${pid}`, { encoding: 'utf8', timeout: 2000 }).trim();
+                if (tt && tt !== '??' && tt !== '?' && tt !== '-') {
+                    const ttyName = tt.startsWith('tty') ? tt : `tty${tt}`;
+                    ptsDevice = `/dev/${ttyName}`;
+                }
+            } catch {}
+        }
 
         // 获取父进程 PID
         let ppid;
@@ -70,8 +82,8 @@ function resolveTarget() {
         const tmuxTarget = findTmuxPaneByPts(ptsDevice);
         if (tmuxTarget) return { type: 'tmux', target: tmuxTarget };
 
-        // 策略 4: 检查是否有 FIFO 中继（relay.js）
-        const ptsNum = ptsDevice.replace('/dev/pts/', '');
+        // 策略 4: FIFO 中继（pty-relay.py），正则兼容 Linux/macOS pts 命名
+        const ptsNum = ptsDevice.replace(/^\/dev\/(pts\/)?/, '');
         const fifoPath = `/tmp/agent-inject-pts${ptsNum}`;
         try {
             const stat = fs.statSync(fifoPath);
@@ -199,7 +211,7 @@ async function injectKeys(target, keys) {
 
     if (target.type === 'pts') {
         // 先检查 FIFO 中继
-        const ptsNum = target.target.replace('/dev/pts/', '');
+        const ptsNum = target.target.replace(/^\/dev\/(pts\/)?/, '');
         const fifoPath = `/tmp/agent-inject-pts${ptsNum}`;
         try {
             if (fs.statSync(fifoPath).isFIFO()) {
@@ -251,6 +263,8 @@ function injectViaTmux(target, keys) {
         if (ch === '\n' || ch === '\r') parts.push('Enter');
         else if (ch === '\x1b') parts.push('Escape');
         else if (ch === '\t') parts.push('Tab');
+        else if (ch === '\x7f' || ch === '\b') parts.push('BSpace');
+        else if (ch === '\x15') parts.push('C-u');
         else parts.push(shellQuote(ch));
     }
 
@@ -298,7 +312,7 @@ async function injectText(target, text) {
 
 /** @deprecated 使用 resolveTarget() 代替 */
 function resolvePtsDevice(startPid) {
-    const target = resolveTarget();
+    const target = resolveTarget(startPid);
     if (!target) return null;
     if (target.type === 'tmux') return `tmux:${target.target}`;
     if (target.type === 'fifo') return `fifo:${target.target}`;

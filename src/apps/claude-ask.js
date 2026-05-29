@@ -29,7 +29,7 @@ function readStdin() {
         process.stdin.setEncoding('utf8');
         process.stdin.on('data', chunk => data += chunk);
         process.stdin.on('end', () => { try { done(JSON.parse(data)); } catch { done({}); } });
-        setTimeout(() => done({}), 3000);
+        setTimeout(() => done({}), 3000).unref();
     });
 }
 

@@ -19,6 +19,7 @@ const fs = require('fs');
 const path = require('path');
 require('../lib/env-config'); // 加载 .env
 const { buildCardFooter } = require('../lib/card-footer');
+const { extractLastAssistantText } = require('../lib/transcript-utils');
 
 const KEY_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit']);
 
@@ -70,7 +71,7 @@ function readStdin() {
         process.stdin.on('end', () => {
             try { done(JSON.parse(data)); } catch { done({}); }
         });
-        setTimeout(() => done({}), 3000);
+        setTimeout(() => done({}), 3000).unref();
     });
 }
 
@@ -92,25 +93,6 @@ function getTimestamp() {
         year: 'numeric', month: '2-digit', day: '2-digit',
         hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
-}
-
-/** 从 transcript 提取最后一条 assistant 文字（当前工具调用之前的输出） */
-function extractLastAssistantText(transcriptPath) {
-    if (!transcriptPath) return null;
-    try {
-        const lines = fs.readFileSync(transcriptPath, 'utf8').trim().split('\n');
-        for (let i = lines.length - 1; i >= 0; i--) {
-            let d;
-            try { d = JSON.parse(lines[i]); } catch { continue; }
-            if (d.type !== 'assistant') continue;
-            const content = d.message?.content || [];
-            const textBlocks = content.filter(b => b.type === 'text' && b.text?.trim());
-            if (textBlocks.length > 0) {
-                return textBlocks.map(b => b.text).join('\n').trim();
-            }
-        }
-    } catch {}
-    return null;
 }
 
 /** 格式化工具输入摘要 */
@@ -274,82 +256,58 @@ async function flushBuffer(bufferPath) {
 
     // ── 构建聚合卡片 ──────────────────────────────────────────────────────────
 
-    // 用 column_set 构建表格行：# | 工具 | 命令/文件 | 结果
-    const MAX_CMD = 52;
-    const MAX_RES = 36;
+    // 详情列不裁剪，飞书自行处理；只取 stdout 第一行避免 heredoc 噪声
+    const TOOL_COLOR = { Bash: 'blue', Edit: 'green', Write: 'orange', Read: 'grey', NotebookEdit: 'purple' };
 
-    const stepRows = allEntries.map((e, i) => {
+    const stepRows = allEntries.map((e) => {
         let cmd = '';
         if (e.input) {
             if (e.tool === 'Bash') {
-                const line = e.input.split('\n')[0];
-                const t = line.length > MAX_CMD ? line.slice(0, MAX_CMD) + '…' : line;
-                cmd = '`' + t + '`';
+                cmd = '`' + e.input.split('\n')[0] + '`';
             } else {
-                const name = e.input.replace(/^(写入|编辑) /, '').split('/').pop();
-                cmd = name.length > MAX_CMD ? name.slice(0, MAX_CMD) + '…' : name;
+                cmd = e.input.replace(/^(写入|编辑) /, '');
             }
         }
-        let res = '';
-        if (e.result) {
-            const line = e.result.split('\n')[0].trim();
-            res = line.length > MAX_RES ? line.slice(0, MAX_RES) + '…' : line;
-        }
+        const res = e.result ? e.result.split('\n')[0].trim() : '';
         return {
-            tag: 'column_set',
-            flex_mode: 'none',
-            horizontal_spacing: 'small',
-            columns: [
-                {
-                    tag: 'column', width: 'auto',
-                    elements: [{ tag: 'div', text: { tag: 'plain_text', content: `${i + 1}` } }],
-                },
-                {
-                    tag: 'column', width: 'auto',
-                    elements: [{ tag: 'div', text: { tag: 'plain_text', content: `${e.icon} ${e.tool}` } }],
-                },
-                {
-                    tag: 'column', width: 'weighted', weight: 3,
-                    elements: [{ tag: 'div', text: { tag: 'lark_md', content: cmd || '—' } }],
-                },
-                {
-                    tag: 'column', width: 'weighted', weight: 2,
-                    elements: [{ tag: 'div', text: { tag: 'plain_text', content: res || '—' } }],
-                },
-            ],
+            tool: [{ text: `${e.icon} ${e.tool}`, color: TOOL_COLOR[e.tool] || 'cyan' }],
+            cmd: cmd || '—',
+            res: res || '—',
         };
     });
 
-    // 只取最后一个有 output 的 entry 的 Claude 文字
+    const tableEl = {
+        tag: 'table',
+        element_id: 'exec_steps',
+        page_size: 10,              // 飞书上限 [1,10]
+        row_height: 'low',          // 'auto' docs 写支持但 API 不实装
+        row_max_height: '300px',
+        header_style: { text_align: 'left', background_style: 'grey', bold: true },
+        columns: [
+            { name: 'tool', display_name: '工具',       data_type: 'options', width: '100px', vertical_align: 'top' },
+            { name: 'cmd',  display_name: '命令 / 文件', data_type: 'lark_md', width: '60%',   vertical_align: 'top' },
+            { name: 'res',  display_name: '结果',       data_type: 'text',    width: 'auto',  vertical_align: 'top' },
+        ],
+        rows: stepRows,
+    };
+
     const lastWithOutput = [...allEntries].reverse().find(e => e.output);
     const claudeOutput = lastWithOutput?.output || null;
 
-    // footer
     const projectName = allEntries[0]?.projectName || '';
-    const footerEl = buildCardFooter({
-        host: 'claude',
-        projectName,
-    });
+    const footerEl = buildCardFooter({ host: 'claude', projectName });
 
     const cardElements = [];
     if (claudeOutput) {
-        cardElements.push({ tag: 'div', text: { tag: 'lark_md', content: `💬 **Claude**:\n${claudeOutput}` } });
+        cardElements.push({
+            tag: 'collapsible_panel',
+            expanded: claudeOutput.length < 200,
+            header: { title: { tag: 'plain_text', content: '💬 Claude' } },
+            elements: [{ tag: 'markdown', content: claudeOutput }],
+        });
         cardElements.push({ tag: 'hr' });
     }
-    // 表头行
-    cardElements.push({
-        tag: 'column_set',
-        flex_mode: 'none',
-        horizontal_spacing: 'small',
-        columns: [
-            { tag: 'column', width: 'auto',     elements: [{ tag: 'div', text: { tag: 'plain_text', content: '#' } }] },
-            { tag: 'column', width: 'auto',     elements: [{ tag: 'div', text: { tag: 'plain_text', content: '工具' } }] },
-            { tag: 'column', width: 'weighted', weight: 3, elements: [{ tag: 'div', text: { tag: 'plain_text', content: '命令 / 文件' } }] },
-            { tag: 'column', width: 'weighted', weight: 2, elements: [{ tag: 'div', text: { tag: 'plain_text', content: '结果' } }] },
-        ],
-    });
-    cardElements.push({ tag: 'hr' });
-    cardElements.push(...stepRows);
+    cardElements.push(tableEl);
     cardElements.push(footerEl);
 
     const card = {

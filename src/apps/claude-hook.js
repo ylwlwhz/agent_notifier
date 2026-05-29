@@ -16,6 +16,7 @@ const { resolvePtsDevice } = require('../lib/terminal-inject');
 const Lark = require('@larksuiteoapi/node-sdk');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
+const { forEachTail, findTail, getAssistantText } = require('../lib/transcript-utils');
 
 // ── 会话统计 ─────────────────────────────────────────────
 
@@ -107,9 +108,17 @@ function readStdin() {
             try { done(JSON.parse(data)); }
             catch { done({}); }
         });
-        // 超时保护，防止没有 stdin 时卡死
-        setTimeout(() => done({}), 3000);
+        // 兜底防 stdin 卡死；.unref() 让 timer 不阻塞进程退出
+        setTimeout(() => done({}), 3000).unref();
     });
+}
+
+/** session 是否 bypass：先看 payload，否则 transcript 反扫 permissionMode */
+function isBypassMode(data) {
+    if (data.permission_mode === 'bypassPermissions') return true;
+    return findTail(data.transcript_path, (d) =>
+        d.permissionMode !== undefined ? d.permissionMode === 'bypassPermissions' : undefined
+    ) === true;
 }
 
 function getProjectName(cwd) {
@@ -122,36 +131,6 @@ function getProjectName(cwd) {
         }
     } catch {}
     return path.basename(cwd);
-}
-
-function getTimestamp() {
-    return new Date().toLocaleString('zh-CN', {
-        hour12: false,
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit'
-    });
-}
-
-/** 从助手消息中提取第一行有意义的文本作为标题 */
-function extractTitle(message, maxLen = 50) {
-    if (!message) return '任务已完成';
-    const lines = message.split('\n');
-    for (const line of lines) {
-        const trimmed = line.trim();
-        // 跳过空行、代码块标记、纯分隔线
-        if (!trimmed || trimmed.startsWith('```') || /^[-=─]+$/.test(trimmed)) continue;
-        // 去掉 markdown 格式符号
-        const cleaned = trimmed.replace(/^[#*>]+\s*/, '').replace(/[*`_~]/g, '').trim();
-        if (!cleaned) continue;
-        return cleaned.length <= maxLen ? cleaned : cleaned.substring(0, maxLen) + '...';
-    }
-    return '任务已完成';
-}
-
-/** 清理文本 */
-function truncate(text) {
-    if (!text) return '';
-    return text.trim();
 }
 
 // ── 卡片构建 ─────────────────────────────────────────────
@@ -205,28 +184,45 @@ function buildCard(title, body, template, projectName, stats, ptsDevice) {
 
 // ── 事件处理 ─────────────────────────────────────────────
 
-function handleStop(data, stats, ptsDevice) {
-    const lastMsg = data.last_assistant_message || '';
-    const title = extractTitle(lastMsg);
-    const body = truncate(lastMsg) || '任务已完成，可以查看执行结果了';
-    return buildCard(`✅ ${title}`, body, 'green', getProjectName(data.cwd), stats, ptsDevice);
+const STOP_BODY_MAX = 6000; // 飞书卡片 content 上限约 30KB，body 留足余量兜底极端单轮
+
+function handleStop(data, getStats, ptsDevice) {
+    // 只收「最近一次 tool_use 之后」的 text：之前的 narration 已由蓝色 live 卡显示，避免重复
+    // （无工具的纯文本 turn 收到 user prompt 边界 = 全部）。last_assistant_message 补未 flush 的尾段
+    const texts = [];
+    let boundaryTs = 0; // 停下来的边界 ts（最近一次 tool_use，或无工具时的 user prompt），作去重 epoch
+    forEachTail(data.transcript_path, (d) => {
+        const ts = +new Date(d.timestamp || 0);
+        if (d.type === 'user' && typeof d.message?.content === 'string') { boundaryTs = ts; return true; }
+        if (d.type !== 'assistant') return false;
+        if ((d.message?.content || []).some(b => b.type === 'tool_use')) { boundaryTs = ts; return true; }
+        const text = getAssistantText(d);
+        if (text) texts.unshift(text);
+        return false;
+    });
+    const last = (data.last_assistant_message || '').trim();
+    if (last && texts[texts.length - 1] !== last) texts.push(last);
+    const body = texts.join('\n\n');
+
+    // 一个 prompt 内多次 Stop，只发新增前缀差；边界 ts 变了（跑了新工具/新 turn）→ 重置 prev 整段发
+    const sentKey = `__stop_sent_${(data.session_id || '').slice(0, 8)}`;
+    sessionState.load();
+    const slot = sessionState.data[sentKey];
+    const prev = slot && slot.boundaryTs === boundaryTs ? slot.body : '';
+    const delta = body.startsWith(prev) ? body.slice(prev.length).trim() : body;
+
+    const save = () => { sessionState.data[sentKey] = { body, boundaryTs, created_at: Date.now() }; sessionState.save(); };
+    if (!delta) {
+        if (slot) return null; // 无新增且已发过 → 跳过
+        save();
+        return buildCard('✅ Claude 完成', '任务已完成，可以查看执行结果了', 'green', getProjectName(data.cwd), getStats(), ptsDevice);
+    }
+    save();
+    const shown = delta.length > STOP_BODY_MAX ? '…（仅显示最新部分）\n\n' + delta.slice(-STOP_BODY_MAX) : delta;
+    return buildCard('✅ Claude 完成', shown, 'green', getProjectName(data.cwd), getStats(), ptsDevice);
 }
 
-function handleNotification(data, stats, ptsDevice) {
-    const type = data.notification_type || '';
-    const message = data.message || '需要你的操作';
-
-    const titleMap = {
-        'permission_prompt': '权限确认',
-        'idle_prompt': '等待输入',
-        'elicitation_dialog': '等待操作'
-    };
-    const title = titleMap[type] || '等待操作';
-
-    return buildCard(`⏸️ ${title}`, message, 'orange', getProjectName(data.cwd), stats, ptsDevice);
-}
-
-function handleStopFailure(data, stats, ptsDevice) {
+function handleStopFailure(data, getStats, ptsDevice) {
     const error = data.error || 'unknown';
     const details = data.error_details || '发生未知错误';
 
@@ -240,7 +236,7 @@ function handleStopFailure(data, stats, ptsDevice) {
     };
     const title = errorMap[error] || '异常退出';
 
-    return buildCard(`❌ ${title}`, details, 'red', getProjectName(data.cwd), stats, ptsDevice);
+    return buildCard(`❌ ${title}`, details, 'red', getProjectName(data.cwd), getStats(), ptsDevice);
 }
 
 // ── 飞书自建应用 API 发送卡片 ──────────────────────────────
@@ -266,290 +262,186 @@ async function getFeishuAppClient() {
     return { client, chatId };
 }
 
-/** 通过自建应用 API 发送普通卡片（Stop / StopFailure） */
-async function sendFeishuAppCard(data, event, stats) {
-    const app = await getFeishuAppClient();
-    if (!app) return;
-
-    const feishuHandlers = {
-        'Stop': handleStop,
-        'Notification': handleNotification,
-        'StopFailure': handleStopFailure
-    };
-    const handler = feishuHandlers[event];
-    if (!handler) return;
-
-    // 给所有卡片添加输入框，支持从卡片直接输入指令
-    const sessionId = data.session_id || '';
-    const stateKey = `feishu_${sessionId.substring(0, 8)}_${Date.now()}`;
-    const ptsDevice = resolvePtsDevice(process.ppid);
-
-    const card = handler(data, stats, ptsDevice);
-
-    // 在 footer（最后一个元素）之前插入输入框
-    const inputEl = buildInputRow(stateKey);
-    const insertAt = card.elements.length - 1;
-    if (insertAt >= 0) {
-        card.elements.splice(insertAt, 0, inputEl);
-    } else {
-        card.elements.push(inputEl);
-    }
-
-    // 存储 session state，使 listener 能路由输入到终端
-    sessionState.addNotification(stateKey, {
-        session_id: sessionId,
-        notification_type: event,
-        pts_device: ptsDevice,
-        created_at: Date.now(),
-        responses: {
-            'esc': { keys: '\x1b', label: 'Esc' },
-            'interrupt': { keys: '\x1b', label: '⛔ Interrupt' },
-        },
-    });
-
+/** 发卡 + 注册回调路由：发送成功才记 sessionState；esc/interrupt 通用中断键在此统一注入 */
+async function sendCard(app, card, { stateKey, sessionId, type, ptsDevice, responses = {} }) {
     try {
         await app.client.im.message.create({
             params: { receive_id_type: 'chat_id' },
-            data: {
-                receive_id: app.chatId,
-                msg_type: 'interactive',
-                content: JSON.stringify(card),
-            },
+            data: { receive_id: app.chatId, msg_type: 'interactive', content: JSON.stringify(card) },
         });
-    } catch (err) {
-        console.error('[feishu-app] 发送卡片失败:', err.message);
-    }
-}
-
-// ── 飞书交互卡片（Notification 事件，带回调按钮） ────────────
-
-async function sendFeishuInteractiveCard(data, stats) {
-    const app = await getFeishuAppClient();
-    if (!app) return;
-
-    const projectName = getProjectName(data.cwd);
-    const type = data.notification_type || '';
-    const message = data.message || '需要你的操作';
-    const sessionId = data.session_id || '';
-
-    // AskUserQuestion 已由 ask-handler.js（PreToolUse）处理，跳过重复卡片
-    // 检查 sessionState 里是否有近期的 feishu_ask_ 条目（30 秒内）
-    const sessionPrefix = sessionId.substring(0, 8);
-    sessionState.load();
-    const hasRecentAsk = Object.entries(sessionState.data)
-        .some(([k, v]) => k.startsWith(`feishu_ask_${sessionPrefix}`) && Date.now() - (v.created_at || 0) < 30000);
-    if (hasRecentAsk) return;
-
-    // bypassPermissions 模式下 PreToolUse 不触发，从 transcript 检测 AskUserQuestion
-    const askInput = extractAskUserQuestion(data.transcript_path);
-    if (askInput) {
-        const { sendSingleSelectCard, sendMultiSelectCard, sendMultiQuestionFirstCard } = require('./claude-ask');
-        const questions = Array.isArray(askInput.questions) ? askInput.questions : [];
-        if (questions.length > 0) {
-            questions.forEach(q => { q._contextText = askInput._contextText || ''; });
-            const ptsDevice = resolvePtsDevice(process.ppid);
-            const stateKey = `feishu_ask_${sessionPrefix}_${Date.now()}`;
-            const notificationType = 'AskUserQuestion';
-
-            const footerEl = buildCardFooter({
-                host: 'claude',
-                ptsDevice,
-                projectName,
-            });
-            const noteParts = footerEl.content;
-
-            if (questions.length > 1) {
-                await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType, noteParts);
-            } else {
-                const q = questions[0];
-                if (q.multiSelect) {
-                    await sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts);
-                } else {
-                    await sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts);
-                }
-            }
-            return;
-        }
-    }
-
-    // Create a unique key for session-state.json
-    const stateKey = `feishu_${sessionPrefix}_${Date.now()}`;
-
-    // 解析终端目标（提前获取用于卡片显示）
-    const ptsDevice = resolvePtsDevice(process.ppid);
-
-    // 构建底部信息栏
-    const footerEl = buildCardFooter({
-        host: 'claude',
-        ptsDevice,
-        projectName,
-        duration: stats?.duration || null,
-    });
-
-    let title, buttons, responses, cardMessage;
-
-    if (type === 'idle_prompt') {
-        // idle_prompt：只有输入框，没有按钮（避免和权限卡片混淆）
-        title = '💬 等待输入';
-        cardMessage = 'Claude 等待你的下一步指令';
-        buttons = null;
-        responses = {};
-    } else {
-        // 权限确认等通用 Notification
-        const titleMap = { 'permission_prompt': '🔐 权限确认', 'elicitation_dialog': '📋 等待操作' };
-        title = titleMap[type] || '⏸️ 等待操作';
-
-        // 从 transcript 读取工具详情 + 从 pty 输出读取实际选项
-        let toolDesc = message || '需要你的操作';
-        let parsedOptions = [];
-        try {
-            // 1. 从 transcript 获取工具调用详情
-            const tLines = fs.readFileSync(data.transcript_path, 'utf8').trim().split('\n');
-            for (let i = tLines.length - 1; i >= 0; i--) {
-                let d; try { d = JSON.parse(tLines[i]); } catch { continue; }
-                if (d.type !== 'assistant') continue;
-                const blocks = d.message?.content || [];
-                for (const b of blocks) {
-                    if (b.type === 'tool_use') {
-                        const input = b.input || {};
-                        if (b.name === 'Bash' && input.command) {
-                            toolDesc = `⚡ **Bash**\n\`\`\`\n${input.command}\n\`\`\``;
-                            if (input.description) toolDesc += `\n${input.description}`;
-                        } else if (input.file_path) {
-                            const icons = { Read: '📖', Edit: '✏️', Write: '📝' };
-                            toolDesc = `${icons[b.name] || '🔧'} **${b.name}**: \`${input.file_path}\``;
-                        } else {
-                            toolDesc = `🔧 **${b.name}**`;
-                        }
-                        break;
-                    }
-                }
-                if (toolDesc !== (message || '需要你的操作')) break;
-            }
-
-            // 2. 从 pty 输出文件读取终端实际选项
-            const ptsDevice = resolvePtsDevice(process.ppid);
-            const ptsMatch = ptsDevice?.match(/pts(\d+)/);
-            if (ptsMatch) {
-                const outputPath = `/tmp/claude-pty-output-${ptsMatch[1]}`;
-                if (fs.existsSync(outputPath)) {
-                    const rawOutput = fs.readFileSync(outputPath, 'utf8');
-                    // 去掉 ANSI 转义码（颜色、光标移动等），再解析选项
-                    // eslint-disable-next-line no-control-regex
-                    const cleanOutput = rawOutput.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-                    const optRegex = /(\d+)\.\s*(.+)/g;
-                    let m;
-                    while ((m = optRegex.exec(cleanOutput)) !== null) {
-                        const text = m[2].trim().split(/\r|\n/)[0].trim();
-                        if (text && /^(Yes|No)/i.test(text)) {
-                            parsedOptions.push({ num: m[1], text });
-                        }
-                    }
-                }
-            }
-        } catch {}
-
-        cardMessage = toolDesc;
-
-        if (parsedOptions.length > 0) {
-            // 从终端输出解析到了实际选项，生成完全匹配的按钮
-            buttons = parsedOptions.map(opt => {
-                const isPositive = /^yes/i.test(opt.text);
-                const isNegative = /^no/i.test(opt.text);
-                return {
-                    text: `${opt.num}. ${opt.text}`,
-                    actionType: `opt_${opt.num}`,
-                    color: isPositive ? 'green' : (isNegative ? 'red' : 'default'),
-                };
-            });
-            buttons.push({ text: '🔓 全局允许', actionType: 'bypass', color: 'default' });
-            responses = {};
-            parsedOptions.forEach(opt => {
-                responses[`opt_${opt.num}`] = { keys: opt.num, label: opt.text };
-            });
-            responses['bypass'] = { keys: '1', label: '全局允许' };
-        } else {
-            // 无法解析选项，使用通用按钮
-            buttons = [
-                { text: '✅ 允许一次', actionType: 'opt_1', color: 'green' },
-                { text: '🔓 会话允许', actionType: 'opt_2', color: 'default' },
-                { text: '❌ 拒绝', actionType: 'opt_no', color: 'red' },
-                { text: '🔓 全局允许', actionType: 'bypass', color: 'default' },
-            ];
-            responses = {
-                'opt_1': { keys: '1', label: '已允许' },
-                'opt_2': { keys: '2', label: '会话允许' },
-                'opt_no': { keys: '\x1b', label: '已拒绝' },
-                'bypass': { keys: '1', label: '全局允许' },
-            };
-        }
-    }
-
-    // Build card JSON
-    const cardElements = parseMarkdownToElements(cardMessage);
-
-    if (buttons) {
-        const buttonElements = buttons.map(btn => ({
-            tag: 'button',
-            text: { tag: 'plain_text', content: btn.text },
-            type: btn.color === 'red' ? 'danger' : (btn.color === 'green' ? 'primary' : 'default'),
-            value: { action_type: btn.actionType, session_state_key: stateKey },
-        }));
-        // 权限卡片：按钮和输入框合并到同一行
-        if (type === 'permission_prompt') {
-            buttonElements.push({
-                tag: 'input',
-                name: 'user_input',
-                placeholder: { tag: 'plain_text', content: '输入指令...' },
-                width: 'fill',
-                value: { action_type: 'text_input', session_state_key: stateKey },
-            });
-            cardElements.push({ tag: 'action', actions: buttonElements });
-        } else {
-            cardElements.push({ tag: 'action', actions: buttonElements });
-            cardElements.push(buildInputRow(stateKey));
-        }
-    } else {
-        // 无按钮时单独输入框
-        cardElements.push(buildInputRow(stateKey));
-    }
-
-    cardElements.push(footerEl);
-
-    const card = {
-        config: { wide_screen_mode: true },
-        header: {
-            title: { tag: 'plain_text', content: title },
-            template: 'orange',
-        },
-        elements: cardElements,
-    };
-
-    // Send the card
-    try {
-        await app.client.im.message.create({
-            params: { receive_id_type: 'chat_id' },
-            data: {
-                receive_id: app.chatId,
-                msg_type: 'interactive',
-                content: JSON.stringify(card),
-            },
-        });
-
-        // Resolve pts device and store notification state
-        const ptsDevice = resolvePtsDevice(process.ppid);
-        responses['esc'] = { keys: '\x1b', label: 'Esc' };
-        responses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
         sessionState.addNotification(stateKey, {
             session_id: sessionId,
             notification_type: type,
             pts_device: ptsDevice,
             created_at: Date.now(),
-            responses: responses,
+            responses: {
+                ...responses,
+                esc: { keys: '\x1b', label: 'Esc' },
+                interrupt: { keys: '\x1b', label: '⛔ Interrupt' },
+            },
         });
     } catch (err) {
-        console.error('[feishu] 发送交互卡片失败:', err.message);
+        console.error('[feishu] 发送卡片失败:', err.message);
     }
+}
+
+/** 通过自建应用 API 发送普通卡片（Stop / StopFailure） */
+async function sendFeishuAppCard(data, event, getStats) {
+    const handler = { Stop: handleStop, StopFailure: handleStopFailure }[event];
+    if (!handler) return;
+
+    const ptsDevice = resolvePtsDevice(process.ppid);
+    const card = handler(data, getStats, ptsDevice);
+    if (!card) return; // handler 返 null 即跳过（Stop 增量空时）
+
+    const app = await getFeishuAppClient();
+    if (!app) return;
+
+    // 在 footer（最后一个元素）前插入输入框，支持从卡片直接回话
+    const sessionId = data.session_id || '';
+    const stateKey = `feishu_${sessionId.substring(0, 8)}_${Date.now()}`;
+    card.elements.splice(Math.max(card.elements.length - 1, 0), 0, buildInputRow(stateKey));
+
+    await sendCard(app, card, { stateKey, sessionId, type: event, ptsDevice });
+}
+
+// ── 权限卡片构建 ─────────────────────────────────────────
+
+/** 反扫 transcript 取最近一次 tool_use 的 markdown 描述 */
+function describeLatestTool(transcriptPath, fallback) {
+    return findTail(transcriptPath, (d) => {
+        if (d.type !== 'assistant') return undefined;
+        const tool = (d.message?.content || []).find(b => b.type === 'tool_use');
+        if (!tool) return undefined;
+        const input = tool.input || {};
+        if (tool.name === 'Bash' && input.command) {
+            return `⚡ **Bash**\n\`\`\`\n${input.command}\n\`\`\`` + (input.description ? `\n${input.description}` : '');
+        }
+        if (input.file_path) {
+            return `${({ Read: '📖', Edit: '✏️', Write: '📝' })[tool.name] || '🔧'} **${tool.name}**: \`${input.file_path}\``;
+        }
+        return `🔧 **${tool.name}**`;
+    }) ?? fallback;
+}
+
+/** 从 pty 输出文件解析终端实际的 Yes/No 编号选项 */
+function parsePermissionOptions(ptsDevice) {
+    const m = ptsDevice?.match(/pts(\d+)/);
+    if (!m) return [];
+    let raw;
+    try { raw = fs.readFileSync(`/tmp/claude-pty-output-${m[1]}`, 'utf8'); } catch { return []; }
+    // eslint-disable-next-line no-control-regex
+    const clean = raw.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
+    const opts = [];
+    const re = /(\d+)\.\s*(.+)/g;
+    let mm;
+    while ((mm = re.exec(clean)) !== null) {
+        const text = mm[2].trim().split(/\r|\n/)[0].trim();
+        if (/^(Yes|No)/i.test(text)) opts.push({ num: mm[1], text });
+    }
+    return opts;
+}
+
+/** 由解析到的选项生成按钮 + 回调键；解析失败回退到通用 允许/会话/拒绝/全局 按钮 */
+function buildPermissionButtons(parsedOptions) {
+    if (!parsedOptions.length) {
+        return {
+            buttons: [
+                { text: '✅ 允许一次', actionType: 'opt_1', color: 'green' },
+                { text: '🔓 会话允许', actionType: 'opt_2', color: 'default' },
+                { text: '❌ 拒绝', actionType: 'opt_no', color: 'red' },
+                { text: '🔓 全局允许', actionType: 'bypass', color: 'default' },
+            ],
+            responses: {
+                opt_1: { keys: '1', label: '已允许' },
+                opt_2: { keys: '2', label: '会话允许' },
+                opt_no: { keys: '\x1b', label: '已拒绝' },
+                bypass: { keys: '1', label: '全局允许' },
+            },
+        };
+    }
+    const buttons = parsedOptions.map(o => ({
+        text: `${o.num}. ${o.text}`,
+        actionType: `opt_${o.num}`,
+        color: /^yes/i.test(o.text) ? 'green' : /^no/i.test(o.text) ? 'red' : 'default',
+    }));
+    buttons.push({ text: '🔓 全局允许', actionType: 'bypass', color: 'default' });
+    const responses = { bypass: { keys: '1', label: '全局允许' } };
+    parsedOptions.forEach(o => { responses[`opt_${o.num}`] = { keys: o.num, label: o.text }; });
+    return { buttons, responses };
+}
+
+/** 按钮组 + 行尾输入框，合并为一个 action 行 */
+function buildButtonRow(buttons, stateKey) {
+    const actions = buttons.map(b => ({
+        tag: 'button',
+        text: { tag: 'plain_text', content: b.text },
+        type: b.color === 'red' ? 'danger' : b.color === 'green' ? 'primary' : 'default',
+        value: { action_type: b.actionType, session_state_key: stateKey },
+    }));
+    actions.push({
+        tag: 'input', name: 'user_input',
+        placeholder: { tag: 'plain_text', content: '输入指令...' },
+        width: 'fill',
+        value: { action_type: 'text_input', session_state_key: stateKey },
+    });
+    return { tag: 'action', actions };
+}
+
+/** bypass 下 PreToolUse 不触发，从 transcript 检测 AskUserQuestion 并委托 claude-ask 发选择卡。已处理返 true */
+async function tryAskUserQuestion(app, data, { projectName, sessionPrefix, sessionId }) {
+    const askInput = extractAskUserQuestion(data.transcript_path);
+    const questions = Array.isArray(askInput?.questions) ? askInput.questions : [];
+    if (!questions.length) return false;
+
+    const { sendSingleSelectCard, sendMultiSelectCard, sendMultiQuestionFirstCard } = require('./claude-ask');
+    questions.forEach(q => { q._contextText = askInput._contextText || ''; });
+    const ptsDevice = resolvePtsDevice(process.ppid);
+    const stateKey = `feishu_ask_${sessionPrefix}_${Date.now()}`;
+    const noteParts = buildCardFooter({ host: 'claude', ptsDevice, projectName }).content;
+
+    if (questions.length > 1) {
+        await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, 'AskUserQuestion', noteParts);
+    } else if (questions[0].multiSelect) {
+        await sendMultiSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, 'AskUserQuestion', noteParts);
+    } else {
+        await sendSingleSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, 'AskUserQuestion', noteParts);
+    }
+    return true;
+}
+
+/** 飞书交互卡片（Notification 事件，带回调按钮）。main 已过滤 idle/elicitation，只剩 permission_prompt */
+async function sendFeishuInteractiveCard(data, getStats) {
+    const app = await getFeishuAppClient();
+    if (!app) return;
+
+    const sessionId = data.session_id || '';
+    const sessionPrefix = sessionId.substring(0, 8);
+    const projectName = getProjectName(data.cwd);
+
+    // 30s 内 ask-handler（PreToolUse）已发过选择卡 → 跳过重复
+    sessionState.load();
+    const hasRecentAsk = Object.entries(sessionState.data)
+        .some(([k, v]) => k.startsWith(`feishu_ask_${sessionPrefix}`) && Date.now() - (v.created_at || 0) < 30000);
+    if (hasRecentAsk) return;
+
+    if (await tryAskUserQuestion(app, data, { projectName, sessionPrefix, sessionId })) return;
+
+    const ptsDevice = resolvePtsDevice(process.ppid);
+    const stateKey = `feishu_${sessionPrefix}_${Date.now()}`;
+    const toolDesc = describeLatestTool(data.transcript_path, data.message || '需要你的操作');
+    const { buttons, responses } = buildPermissionButtons(parsePermissionOptions(ptsDevice));
+
+    const card = {
+        config: { wide_screen_mode: true },
+        header: { title: { tag: 'plain_text', content: '🔐 权限确认' }, template: 'orange' },
+        elements: [
+            ...parseMarkdownToElements(toolDesc),
+            buildButtonRow(buttons, stateKey),
+            buildCardFooter({ host: 'claude', ptsDevice, projectName, duration: getStats()?.duration || null }),
+        ],
+    };
+    await sendCard(app, card, { stateKey, sessionId, type: data.notification_type || '', ptsDevice, responses });
 }
 
 // ── 主流程 ───────────────────────────────────────────────
@@ -559,14 +451,21 @@ async function main() {
     const event = data.hook_event_name;
     if (!event) return;
 
-    const stats = parseSessionStats(data.transcript_path);
-    const tasks = [];
-    const useFeishuApp = envConfig.getFeishuAppConfig().enabled;
-    if (!useFeishuApp) return;
+    if (!envConfig.getFeishuAppConfig().enabled) return;
 
+    // 懒求值：只在确实发卡时才读全文算 stats，跳过路径（bypass / dedup）零开销
+    let statsVal, statsDone = false;
+    const getStats = () => {
+        if (!statsDone) { statsVal = parseSessionStats(data.transcript_path); statsDone = true; }
+        return statsVal;
+    };
+
+    const tasks = [];
     if (event === 'Notification') {
         const type = data.notification_type || '';
         if (type === 'permission_prompt') {
+            // bypass 模式跳过（Notification payload 不带 mode，看 transcript）
+            if (isBypassMode(data)) return;
             const ptsDevice = resolvePtsDevice(process.ppid);
             sessionState.load();
             const meta = sessionState.data['__meta__'] || {};
@@ -578,10 +477,10 @@ async function main() {
             }
         }
         if (type !== 'idle_prompt' && type !== 'elicitation_dialog') {
-            tasks.push(sendFeishuInteractiveCard(data, stats));
+            tasks.push(sendFeishuInteractiveCard(data, getStats));
         }
     } else {
-        tasks.push(sendFeishuAppCard(data, event, stats));
+        tasks.push(sendFeishuAppCard(data, event, getStats));
     }
 
     if (tasks.length > 0) {

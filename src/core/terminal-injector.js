@@ -19,7 +19,9 @@ function createTerminalInjector({ injectText }) {
             const normalized = normalizeResponse(response);
 
             if (normalized.responseType === 'text') {
-                return injectText(target, `${normalized.value}\r`);
+                // 3×Ctrl-U 清 input 残留，避免拼接上次未提交内容
+                const CLEAR = '\x15'.repeat(3);
+                return injectText(target, `${CLEAR}${normalized.value}\r`);
             }
 
             if (normalized.responseType === 'approve') {
