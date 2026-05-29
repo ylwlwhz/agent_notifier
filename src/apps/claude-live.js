@@ -18,7 +18,8 @@
 const fs = require('fs');
 const path = require('path');
 require('../lib/env-config'); // 加载 .env
-const { card2, footer } = require('../lib/card');
+const { card2, termLabel } = require('../lib/card');
+const { resolvePtsDevice } = require('../lib/terminal-inject');
 
 const KEY_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit']);
 
@@ -171,7 +172,7 @@ function reconstructSegments(transcriptPath) {
 }
 
 /** 单个「文字段 + 其工具」渲染成一张执行摘要卡 */
-function buildSegmentCard(seg, projectName, capture) {
+function buildSegmentCard(seg, projectName, capture, ptsDevice) {
     const rows = seg.tools.map(e => {
         let cmd = '';
         if (capture.tools && e.input) cmd = e.tool === 'Bash' ? '`' + e.input.split('\n')[0] + '`' : e.input.replace(/^(写入|编辑) /, '');
@@ -180,7 +181,7 @@ function buildSegmentCard(seg, projectName, capture) {
     });
     const elements = [];
     if (capture.output && seg.text) {
-        elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: '💬 Claude' } }, elements: [{ tag: 'markdown', content: seg.text }] });
+        elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: `❯ ${termLabel(ptsDevice) || 'Claude'}` } }, elements: [{ tag: 'markdown', content: seg.text }] });
         elements.push({ tag: 'hr' });
     }
     elements.push({
@@ -193,7 +194,6 @@ function buildSegmentCard(seg, projectName, capture) {
         ],
         rows,
     });
-    elements.push(footer('claude'));
     return card2({
         template: 'blue',
         title: '执行摘要',
@@ -217,8 +217,9 @@ async function main() {
     const sessionId = data.session_id || 'unknown';
     const bufferPath = `/tmp/claude-live-${sessionId.slice(0, 8)}.jsonl`;
 
-    // 仅作 debounce 触发 + 携带 transcript 路径；卡片内容 flush 时从 transcript 重建（避免 flush race）
-    const entry = { transcriptPath: data.transcript_path, projectName: getProjectName(data.cwd), ts: Date.now() };
+    // 仅作 debounce 触发 + 携带 transcript 路径；卡片内容 flush 时从 transcript 重建（避免 flush race）。
+    // ptsDevice 须在此（PostToolUse，ppid 为 claude）解析，flush 子进程的 ppid 已非 claude
+    const entry = { transcriptPath: data.transcript_path, projectName: getProjectName(data.cwd), ptsDevice: resolvePtsDevice(process.ppid), ts: Date.now() };
 
     // 追加 entry 到缓冲文件
     fs.appendFileSync(bufferPath, JSON.stringify(entry) + '\n', 'utf8');
@@ -305,6 +306,7 @@ async function flushBuffer(bufferPath) {
     const capture = parseCaptureConfig() || {};
     const transcriptPath = entries[entries.length - 1]?.transcriptPath;
     const projectName = entries[entries.length - 1]?.projectName || '';
+    const ptsDevice = entries[entries.length - 1]?.ptsDevice || null;
     const { turnTs, segments } = reconstructSegments(transcriptPath);
     const withTools = segments.filter(s => s.tools.length > 0); // 纯文字尾段交给绿色 Stop 卡，不在此重复
     if (!withTools.length) return;
@@ -312,7 +314,7 @@ async function flushBuffer(bufferPath) {
     // 跨 turn（turnTs 变）重置卡片索引；同 turn 内按段索引：内容变才 patch、新段 create（触发通知）
     const cards = existing && existing.turnTs === turnTs ? (existing.cards || []) : [];
     for (let i = 0; i < withTools.length; i++) {
-        const card = buildSegmentCard(withTools[i], projectName, capture);
+        const card = buildSegmentCard(withTools[i], projectName, capture, ptsDevice);
         const sig = hashStr(JSON.stringify(card.body.elements));
         const slot = cards[i];
         if (slot?.message_id) {

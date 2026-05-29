@@ -16,7 +16,7 @@ const { resolvePtsDevice } = require('../lib/terminal-inject');
 const Lark = require('@larksuiteoapi/node-sdk');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
-const { card2, statsTags, inputEl, escButton, buttonRow, footer } = require('../lib/card');
+const { card2, statsTags, inputEl, buttonRow, footer, escFooterRow } = require('../lib/card');
 const { forEachTail, findTail, getAssistantText } = require('../lib/transcript-utils');
 
 // ── 会话统计 ─────────────────────────────────────────────
@@ -136,20 +136,16 @@ function getProjectName(cwd) {
 
 // ── 卡片构建 ─────────────────────────────────────────────
 
-/** Stop / StopFailure 卡：项目作副标题，时长/token 作 header 标签，正文 + 灰字 footer */
-function buildCard(title, body, template, projectName, stats, ptsDevice) {
-    return card2({
-        template, title,
-        tags: statsTags(stats),
-        elements: [...parseMarkdownToElements(body), footer('claude', ptsDevice)],
-    });
+/** Stop / StopFailure 卡：时长/token 作 header 标签，正文为 body；输入框与 footer 由发送侧补 */
+function buildCard(title, body, template, stats) {
+    return card2({ template, title, tags: statsTags(stats), elements: parseMarkdownToElements(body) });
 }
 
 // ── 事件处理 ─────────────────────────────────────────────
 
 const STOP_BODY_MAX = 6000; // 飞书卡片 content 上限约 30KB，body 留足余量兜底极端单轮
 
-function handleStop(data, getStats, ptsDevice) {
+function handleStop(data, getStats) {
     // 只收「最近一次 tool_use 之后」的 text：之前的 narration 已由蓝色 live 卡显示，避免重复
     // （无工具的纯文本 turn 收到 user prompt 边界 = 全部）。last_assistant_message 补未 flush 的尾段
     const texts = [];
@@ -178,11 +174,11 @@ function handleStop(data, getStats, ptsDevice) {
     if (!delta) {
         if (slot) return null; // 无新增且已发过 → 跳过
         save();
-        return buildCard('Claude 完成', '任务已完成，可以查看执行结果了', 'green', getProjectName(data.cwd), getStats(), ptsDevice);
+        return buildCard('Claude 完成', '任务已完成，可以查看执行结果了', 'green', getStats());
     }
     save();
     const shown = delta.length > STOP_BODY_MAX ? '…（仅显示最新部分）\n\n' + delta.slice(-STOP_BODY_MAX) : delta;
-    return buildCard('Claude 完成', shown, 'green', getProjectName(data.cwd), getStats(), ptsDevice);
+    return buildCard('Claude 完成', shown, 'green', getStats());
 }
 
 /** API 错误真实文本：payload 不带时反扫 transcript 取最近一条 isApiErrorMessage 助手消息 */
@@ -192,7 +188,7 @@ function latestApiError(transcriptPath) {
     );
 }
 
-function handleStopFailure(data, getStats, ptsDevice) {
+function handleStopFailure(data, getStats) {
     const error = data.error || 'unknown';
     const details = data.error_details || latestApiError(data.transcript_path) || '发生未知错误';
 
@@ -206,7 +202,7 @@ function handleStopFailure(data, getStats, ptsDevice) {
     };
     const title = errorMap[error] || '异常退出';
 
-    return buildCard(title, details, 'red', getProjectName(data.cwd), getStats(), ptsDevice);
+    return buildCard(title, details, 'red', getStats());
 }
 
 // ── 飞书自建应用 API 发送卡片 ──────────────────────────────
@@ -260,18 +256,17 @@ async function sendFeishuAppCard(data, event, getStats) {
     const handler = { Stop: handleStop, StopFailure: handleStopFailure }[event];
     if (!handler) return;
 
-    const ptsDevice = resolvePtsDevice(process.ppid);
-    const card = handler(data, getStats, ptsDevice);
+    const card = handler(data, getStats);
     if (!card) return; // handler 返 null 即跳过（Stop 增量空时）
 
     const app = await getFeishuAppClient();
     if (!app) return;
 
-    // 在 footer（最后一个元素）前插入输入框，支持从卡片直接回话
+    // 末尾补输入框（卡片直接回话）+ 中断按钮与终端 id 同行
+    const ptsDevice = resolvePtsDevice(process.ppid);
     const sessionId = data.session_id || '';
     const stateKey = `feishu_${sessionId.substring(0, 8)}_${Date.now()}`;
-    const els = card.body.elements;
-    els.splice(Math.max(els.length - 1, 0), 0, inputEl(stateKey), escButton(stateKey));
+    card.body.elements.push(inputEl(stateKey), escFooterRow(stateKey, ptsDevice));
 
     await sendCard(app, card, { stateKey, sessionId, type: event, ptsDevice });
 }

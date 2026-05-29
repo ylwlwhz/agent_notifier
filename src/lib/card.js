@@ -69,12 +69,27 @@ function selectCard({ template = 'orange', title, tags, contextText, question, o
     return card2({ template, icon: '', title, tags, elements: els }); // 问题卡不挂图标（橙色 lock 是权限专用）
 }
 
-/** footer：仅留终端 id（多会话分辨用）；无终端则不要 footer。host/时间/项目都去掉，飞书自带消息时间 */
-function footer(host, ptsDevice) {
-    if (!ptsDevice) return null;
+/** ptsDevice → 简短终端 id：去 tmux:/dev/ 前缀，裁默认窗格后缀 :0.0（session 名已唯一），
+ *  :N.M 非默认时保留以区分多窗格 */
+function termLabel(ptsDevice) {
+    if (!ptsDevice) return '';
     const t = String(ptsDevice);
-    const term = t.startsWith('tmux:') ? t.slice(5) : t.replace('/dev/', '');
-    return { tag: 'markdown', content: `<font color='grey'>🖥 ${term}</font>` };
+    return (t.startsWith('tmux:') ? t.slice(5) : t.replace('/dev/', '')).replace(/:0\.0$/, '');
 }
 
-module.exports = { card2, statsTags, inputEl, escButton, buttonRow, selectCard, footer };
+/** footer：仅留终端 id（多会话分辨用）；无终端则不要 footer。host/时间/项目都去掉，飞书自带消息时间 */
+function footer(host, ptsDevice) {
+    const term = termLabel(ptsDevice);
+    if (!term) return null;
+    return { tag: 'markdown', content: `<font color='grey'>${term}</font>` };
+}
+
+/** 中断按钮 + 终端 id 同行：左按钮、右灰字，省一行；无终端则退化为单按钮行 */
+function escFooterRow(stateKey, ptsDevice) {
+    const f = footer('', ptsDevice);
+    const columns = [{ tag: 'column', width: 'auto', vertical_align: 'center', elements: [escButton(stateKey)] }];
+    if (f) columns.push({ tag: 'column', width: 'weighted', weight: 1, vertical_align: 'center', horizontal_align: 'right', elements: [f] });
+    return { tag: 'column_set', horizontal_spacing: '8px', columns };
+}
+
+module.exports = { card2, statsTags, inputEl, escButton, buttonRow, selectCard, footer, escFooterRow, termLabel };
