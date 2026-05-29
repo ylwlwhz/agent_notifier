@@ -19,7 +19,6 @@ const fs = require('fs');
 const path = require('path');
 require('../lib/env-config'); // 加载 .env
 const { buildCardFooter } = require('../lib/card-footer');
-const { extractLastAssistantText } = require('../lib/transcript-utils');
 
 const KEY_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit']);
 
@@ -87,14 +86,6 @@ function getProjectName(cwd) {
     return path.basename(cwd);
 }
 
-function getTimestamp() {
-    return new Date().toLocaleString('zh-CN', {
-        hour12: false,
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit'
-    });
-}
-
 /** 格式化工具输入摘要 */
 function formatToolInput(toolName, toolInput) {
     if (!toolInput) return '';
@@ -134,6 +125,78 @@ function formatToolResult(toolResponse) {
     return text.trim().split('\n').join('\n');
 }
 
+// ─── 执行摘要卡构建 ───────────────────────────────────────────────────────────
+
+const TOOL_COLOR = { Bash: 'blue', Edit: 'green', Write: 'orange', Read: 'grey', NotebookEdit: 'purple' };
+
+function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h; }
+
+/** 从 transcript 重建当前 turn（到上一条 user prompt 为止）的「文字段 → 其后工具」结构。
+ *  text 块起一个新段，其后的 KEY_TOOLS 工具归入该段；tool_result 按 tool_use_id 回填。返回 { turnTs, segments } */
+function reconstructSegments(transcriptPath) {
+    let raw;
+    try { raw = fs.readFileSync(transcriptPath, 'utf8'); } catch { return { turnTs: 0, segments: [] }; }
+    const lines = raw.trim().split('\n');
+    let start = 0, turnTs = 0;
+    for (let i = lines.length - 1; i >= 0; i--) {
+        try {
+            const d = JSON.parse(lines[i]);
+            if (d.type === 'user' && typeof d.message?.content === 'string') { start = i + 1; turnTs = +new Date(d.timestamp || 0); break; }
+        } catch {}
+    }
+    const segments = [];
+    const resultMap = {};
+    let cur = null;
+    for (let i = start; i < lines.length; i++) {
+        let d; try { d = JSON.parse(lines[i]); } catch { continue; }
+        if (d.type === 'assistant') {
+            for (const b of d.message?.content || []) {
+                if (b.type === 'text' && b.text?.trim()) {
+                    cur = { text: b.text.trim(), tools: [] };
+                    segments.push(cur);
+                } else if (b.type === 'tool_use' && KEY_TOOLS.has(b.name)) {
+                    if (!cur) { cur = { text: '', tools: [] }; segments.push(cur); }
+                    cur.tools.push({ tool: b.name, icon: TOOL_ICONS[b.name] || '🔧', input: formatToolInput(b.name, b.input), id: b.id });
+                }
+            }
+        } else if (d.type === 'user' && Array.isArray(d.message?.content)) {
+            for (const b of d.message.content) {
+                // 包成 { content } 让 formatToolResult 的 .content 分支同时吃 string 与 text-block 数组
+                if (b.type === 'tool_result' && b.tool_use_id) resultMap[b.tool_use_id] = formatToolResult({ content: b.content });
+            }
+        }
+    }
+    for (const s of segments) for (const t of s.tools) t.result = resultMap[t.id] || null;
+    return { turnTs, segments };
+}
+
+/** 单个「文字段 + 其工具」渲染成一张执行摘要卡 */
+function buildSegmentCard(seg, projectName, capture) {
+    const rows = seg.tools.map(e => {
+        let cmd = '';
+        if (capture.tools && e.input) cmd = e.tool === 'Bash' ? '`' + e.input.split('\n')[0] + '`' : e.input.replace(/^(写入|编辑) /, '');
+        const res = capture.results && e.result ? e.result.split('\n')[0].trim() : '';
+        return { tool: [{ text: `${e.icon} ${e.tool}`, color: TOOL_COLOR[e.tool] || 'cyan' }], cmd: cmd || '—', res: res || '—' };
+    });
+    const elements = [];
+    if (capture.output && seg.text) {
+        elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: '💬 Claude' } }, elements: [{ tag: 'markdown', content: seg.text }] });
+        elements.push({ tag: 'hr' });
+    }
+    elements.push({
+        tag: 'table', element_id: 'exec_steps', page_size: 10, row_height: 'low', row_max_height: '300px',
+        header_style: { text_align: 'left', background_style: 'grey', bold: true },
+        columns: [
+            { name: 'tool', display_name: '工具',       data_type: 'options', width: '100px', vertical_align: 'top' },
+            { name: 'cmd',  display_name: '命令 / 文件', data_type: 'lark_md', width: '60%',   vertical_align: 'top' },
+            { name: 'res',  display_name: '结果',       data_type: 'text',    width: 'auto',  vertical_align: 'top' },
+        ],
+        rows,
+    });
+    elements.push(buildCardFooter({ host: 'claude', projectName }));
+    return { config: { wide_screen_mode: true }, header: { title: { tag: 'plain_text', content: `⚡ 执行摘要（${seg.tools.length} 步）` }, template: 'blue' }, elements };
+}
+
 // ─── 模式 1：正常模式（PostToolUse hook 调用）────────────────────────────────
 
 async function main() {
@@ -149,20 +212,8 @@ async function main() {
     const sessionId = data.session_id || 'unknown';
     const bufferPath = `/tmp/claude-live-${sessionId.slice(0, 8)}.jsonl`;
 
-    const entry = {
-        tool: toolName,
-        icon: TOOL_ICONS[toolName] || '🔧',
-        input: capture.tools ? formatToolInput(toolName, data.tool_input) : null,
-        result: capture.results ? formatToolResult(data.tool_response) : null,
-        output: capture.output ? extractLastAssistantText(data.transcript_path) : null,
-        ts: Date.now(),
-        projectName: getProjectName(data.cwd),
-        // 始终记录 assistant 文字指纹，用于 flush 判断是否换了新任务
-        assistantKey: (() => {
-            const t = extractLastAssistantText(data.transcript_path);
-            return t ? t.trim().slice(0, 80) : '';
-        })(),
-    };
+    // 仅作 debounce 触发 + 携带 transcript 路径；卡片内容 flush 时从 transcript 重建（避免 flush race）
+    const entry = { transcriptPath: data.transcript_path, projectName: getProjectName(data.cwd), ts: Date.now() };
 
     // 追加 entry 到缓冲文件
     fs.appendFileSync(bufferPath, JSON.stringify(entry) + '\n', 'utf8');
@@ -238,125 +289,43 @@ async function flushBuffer(bufferPath) {
         } catch { return; }
     }
 
-    // ── 加载 session state，合并已有 entries ──────────────────────────────────
+    // ── 加载 session state（按段索引追踪各卡 message_id）──────────────────────
     const { sessionState } = require('../lib/session-state');
     await sessionState.load();
 
     const stateKey = 'live_msg_' + sessionKey;
     const existing = sessionState.data[stateKey];
 
-    // Claude 输出文字变了 → 新任务 → 重置 entries 并 create 新卡（触发通知）
-    // 同一段 Claude 输出内的工具调用 → 静默 patch 同一张卡
-    const currentKey = entries[0]?.assistantKey || '';
-    const existingKey = existing?.assistantKey || '';
-    const isNewTask = currentKey !== '' && existingKey !== '' && currentKey !== existingKey;
+    // flush 时 transcript 已落盘，按文字边界拆成多张卡（每段文字 + 其后工具一张）
+    const capture = parseCaptureConfig() || {};
+    const transcriptPath = entries[entries.length - 1]?.transcriptPath;
+    const projectName = entries[entries.length - 1]?.projectName || '';
+    const { turnTs, segments } = reconstructSegments(transcriptPath);
+    const withTools = segments.filter(s => s.tools.length > 0); // 纯文字尾段交给绿色 Stop 卡，不在此重复
+    if (!withTools.length) return;
 
-    // 合并已有 entries（新任务时重置），最多保留 40 条
-    const allEntries = [...(isNewTask ? [] : (existing?.entries || [])), ...entries].slice(-40);
-
-    // ── 构建聚合卡片 ──────────────────────────────────────────────────────────
-
-    // 详情列不裁剪，飞书自行处理；只取 stdout 第一行避免 heredoc 噪声
-    const TOOL_COLOR = { Bash: 'blue', Edit: 'green', Write: 'orange', Read: 'grey', NotebookEdit: 'purple' };
-
-    const stepRows = allEntries.map((e) => {
-        let cmd = '';
-        if (e.input) {
-            if (e.tool === 'Bash') {
-                cmd = '`' + e.input.split('\n')[0] + '`';
-            } else {
-                cmd = e.input.replace(/^(写入|编辑) /, '');
-            }
-        }
-        const res = e.result ? e.result.split('\n')[0].trim() : '';
-        return {
-            tool: [{ text: `${e.icon} ${e.tool}`, color: TOOL_COLOR[e.tool] || 'cyan' }],
-            cmd: cmd || '—',
-            res: res || '—',
-        };
-    });
-
-    const tableEl = {
-        tag: 'table',
-        element_id: 'exec_steps',
-        page_size: 10,              // 飞书上限 [1,10]
-        row_height: 'low',          // 'auto' docs 写支持但 API 不实装
-        row_max_height: '300px',
-        header_style: { text_align: 'left', background_style: 'grey', bold: true },
-        columns: [
-            { name: 'tool', display_name: '工具',       data_type: 'options', width: '100px', vertical_align: 'top' },
-            { name: 'cmd',  display_name: '命令 / 文件', data_type: 'lark_md', width: '60%',   vertical_align: 'top' },
-            { name: 'res',  display_name: '结果',       data_type: 'text',    width: 'auto',  vertical_align: 'top' },
-        ],
-        rows: stepRows,
-    };
-
-    const lastWithOutput = [...allEntries].reverse().find(e => e.output);
-    const claudeOutput = lastWithOutput?.output || null;
-
-    const projectName = allEntries[0]?.projectName || '';
-    const footerEl = buildCardFooter({ host: 'claude', projectName });
-
-    const cardElements = [];
-    if (claudeOutput) {
-        cardElements.push({
-            tag: 'collapsible_panel',
-            expanded: claudeOutput.length < 200,
-            header: { title: { tag: 'plain_text', content: '💬 Claude' } },
-            elements: [{ tag: 'markdown', content: claudeOutput }],
-        });
-        cardElements.push({ tag: 'hr' });
-    }
-    cardElements.push(tableEl);
-    cardElements.push(footerEl);
-
-    const card = {
-        config: { wide_screen_mode: true },
-        header: {
-            title: { tag: 'plain_text', content: `⚡ 执行摘要（${allEntries.length} 步）` },
-            template: 'blue',
-        },
-        elements: cardElements,
-    };
-
-    // ── Patch-or-create：同一任务静默 patch，新任务 create 触发通知 ──────────────
-
-    let patched = false;
-    if (!isNewTask && existing?.message_id) {
-        try {
-            await client.im.message.patch({
-                path: { message_id: existing.message_id },
-                data: { content: JSON.stringify(card) },
-            });
-            patched = true;
-            sessionState.data[stateKey] = { ...existing, entries: allEntries, assistantKey: currentKey || existingKey };
-            sessionState.save();
-        } catch (err) {
-            console.error('[live/flush] patch 失败，改为 create:', err.message);
+    // 跨 turn（turnTs 变）重置卡片索引；同 turn 内按段索引：内容变才 patch、新段 create（触发通知）
+    const cards = existing && existing.turnTs === turnTs ? (existing.cards || []) : [];
+    for (let i = 0; i < withTools.length; i++) {
+        const card = buildSegmentCard(withTools[i], projectName, capture);
+        const sig = hashStr(JSON.stringify(card.elements));
+        const slot = cards[i];
+        if (slot?.message_id) {
+            if (slot.sig === sig) continue; // 内容没变 → 免一次 patch
+            try {
+                await client.im.message.patch({ path: { message_id: slot.message_id }, data: { content: JSON.stringify(card) } });
+                slot.sig = sig;
+            } catch (err) { console.error('[live/flush] patch 失败:', err.message); }
+        } else {
+            try {
+                const r = await client.im.message.create({
+                    params: { receive_id_type: 'chat_id' },
+                    data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
+                });
+                if (r?.data?.message_id) cards[i] = { message_id: r.data.message_id, sig };
+            } catch (err) { console.error('[live/flush] 发送失败:', err.message); }
         }
     }
-
-    if (!patched) {
-        try {
-            const result = await client.im.message.create({
-                params: { receive_id_type: 'chat_id' },
-                data: {
-                    receive_id: chatId,
-                    msg_type: 'interactive',
-                    content: JSON.stringify(card),
-                },
-            });
-            if (result?.data?.message_id) {
-                sessionState.data[stateKey] = {
-                    message_id: result.data.message_id,
-                    entries: allEntries,
-                    assistantKey: currentKey || existingKey,
-                    created_at: Date.now(),
-                };
-                sessionState.save();
-            }
-        } catch (err) {
-            console.error('[live/flush] 发送失败:', err.message);
-        }
-    }
+    sessionState.data[stateKey] = { turnTs, cards, created_at: Date.now() };
+    sessionState.save();
 }

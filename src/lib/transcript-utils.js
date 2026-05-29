@@ -48,11 +48,4 @@ function getAssistantText(d) {
         .map(b => b.text).join('\n').trim();
 }
 
-/** 最近一条带 text 的 assistant message */
-function extractLastAssistantText(transcriptPath) {
-    return findTail(transcriptPath, (d) =>
-        d.type === 'assistant' ? (getAssistantText(d) || undefined) : undefined
-    ) || '';
-}
-
-module.exports = { forEachTail, findTail, getAssistantText, extractLastAssistantText };
+module.exports = { forEachTail, findTail, getAssistantText };
