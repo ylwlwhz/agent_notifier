@@ -16,8 +16,10 @@ const { injectKeys, injectText } = require('../lib/terminal-inject');
 const { createFeishuClient } = require('../channels/feishu/feishu-client');
 const { createFeishuInteractionHandler } = require('../channels/feishu/feishu-interaction-handler');
 const { createCodexInputBridge } = require('../adapters/codex/cli-input-bridge');
-const { selectCard, card2 } = require('../lib/card');
+const { selectCard, card2, inputEl, escButton } = require('../lib/card');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
+const launcher = require('./launcher');
+const { buildCompletionCard } = require('../lib/completion-card');
 
 const WS_MAX_AGE_MS = parseInt(process.env.FEISHU_WS_MAX_AGE_MIN || '25', 10) * 60_000;
 const HEALTH_CHECK_INTERVAL_MS = 60_000;
@@ -85,6 +87,12 @@ class FeishuListener {
     start() {
         // Create event dispatcher — 长连接模式下所有事件注册在 EventDispatcher 中
         this.eventDispatcher = new Lark.EventDispatcher({}).register({
+            // 文本消息：claude / ccback 命令
+            'im.message.receive_v1': async (data) => {
+                this.lastEventTime = Date.now();
+                try { await this.handleMessage(data); }
+                catch (err) { console.error('[feishu-listener] 消息处理失败:', err.message); }
+            },
             // 卡片交互回调（按钮点击 + 输入框提交）
             'card.action.trigger': async (data) => {
                 this.lastEventTime = Date.now();
@@ -149,6 +157,14 @@ class FeishuListener {
         if (!notification) {
             console.log('[feishu-listener] 通知已过期或已处理:', session_state_key);
             return;
+        }
+
+        // 启动 / 接回菜单：无 pts_device，须在终端检查前分流
+        if (notification._launch) {
+            return this.handleLaunch(notification, action_type, session_state_key);
+        }
+        if (notification._ccback) {
+            return this.handleCcback(notification, action_type, session_state_key);
         }
 
         // Check terminal target
@@ -321,6 +337,139 @@ class FeishuListener {
                 console.error('[feishu-listener] 发送下一题失败:', err.message));
         }
         return responseEntry.label;
+    }
+
+    /** 菜单回调 opt_N → 选项下标；非选项回调（中断/Other 等）返 -1 */
+    menuIndex(action_type) {
+        const m = /^opt_(\d+)$/.exec(action_type || '');
+        return m ? +m[1] : -1;
+    }
+
+    /** 文本消息入口：`claude` → 本地菜单；`claude <host>` → 远程菜单；`ccback` → 会话回顾 */
+    async handleMessage(data) {
+        const msg = data?.message;
+        if (!msg || msg.message_type !== 'text') return;
+        let text = '';
+        try { text = (JSON.parse(msg.content || '{}').text || '').trim(); } catch { return; }
+        text = text.replace(/@_user_\d+/g, '').trim(); // 去掉 @机器人 提及占位
+        const parts = text.split(/\s+/).filter(Boolean);
+        const chatId = msg.chat_id;
+        if (parts[0] === 'ccback') return this.sendCcbackMenu(chatId); // 接回：回顾某会话最新完成卡
+        if (parts[0] !== 'claude') return; // 其余文本忽略，不干扰普通聊天
+        const host = parts[1];
+        console.log(`[feishu-listener] 启动命令: claude ${host || '(本地)'}`);
+        if (!host) return this.sendLaunchMenu(chatId, 'local');
+        if (launcher.REMOTE_HOSTS.includes(host)) return this.sendLaunchMenu(chatId, 'remote', host);
+        await this.sendText(chatId, `未知主机「${host}」。可用：${launcher.REMOTE_HOSTS.join(' ')}\n或直接发 claude 启动本地`);
+    }
+
+    /** 发项目选择菜单卡（竖排按钮，opt_N → items[N]） */
+    async sendLaunchMenu(chatId, mode, host) {
+        let projects, title, question;
+        if (mode === 'local') {
+            projects = launcher.listLocalProjects();
+            title = '启动 claude · 本地 ~/Code';
+            question = '选择项目目录：';
+        } else {
+            const r = launcher.listRemoteProjects(host);
+            if (r.error) return this.sendText(chatId, `❌ 列 ${host} 项目失败：${r.error}`);
+            projects = r.projects;
+            title = `启动 claude · ${host}`;
+            question = `选择 ${host} 上的项目：`;
+        }
+        if (!projects.length) return this.sendText(chatId, mode === 'local' ? '~/Code 下没有项目目录' : `${host} 上没有项目`);
+
+        const stateKey = `feishu_launch_${Date.now()}`;
+        this.state.addNotification(stateKey, { created_at: Date.now(), _launch: true, mode, host: host || null, chat_id: chatId, items: projects });
+
+        const els = [{ tag: 'markdown', content: question }];
+        projects.forEach((p, i) => els.push({
+            tag: 'button', text: { tag: 'plain_text', content: p }, type: i === 0 ? 'primary' : 'default',
+            value: { action_type: `opt_${i}`, session_state_key: stateKey },
+        }));
+        await this.sendCardJson(chatId, card2({ template: 'blue', title, elements: els }));
+    }
+
+    /** 启动菜单回调：opt_N → 本地立即启动 / 远程异步拉取 */
+    async handleLaunch(notification, action_type, stateKey) {
+        const i = this.menuIndex(action_type);
+        if (i < 0) return;
+        const proj = (notification.items || [])[i];
+        if (!proj) return '选项无效';
+        this.state.removeNotification(stateKey);
+
+        if (notification.mode === 'local') {
+            const r = launcher.launchLocal(proj);
+            if (r.error) { await this.sendText(notification.chat_id, `❌ 启动失败：${r.error}`); return '启动失败'; }
+            await this.sendLaunchedCard(notification.chat_id, proj, r.name);
+            return '已启动';
+        }
+        launcher.launchRemote(notification.host, proj, notification.chat_id);
+        await this.sendText(notification.chat_id, `⏬ 正在从 ${notification.host} 拉取 ${proj}…\n完成后自动启动并通知`);
+        return '正在拉取';
+    }
+
+    /** 发会话选择菜单卡（正在运行的 claude 会话，opt_N → items[N]） */
+    async sendCcbackMenu(chatId) {
+        const sessions = launcher.listClaudeSessions();
+        if (!sessions.length) return this.sendText(chatId, '没有正在运行的 claude 会话');
+        const stateKey = `feishu_ccback_${Date.now()}`;
+        this.state.addNotification(stateKey, { created_at: Date.now(), _ccback: true, chat_id: chatId, items: sessions });
+        const els = [{ tag: 'markdown', content: '接回哪个会话：' }];
+        sessions.forEach((s, i) => els.push({
+            tag: 'button', text: { tag: 'plain_text', content: s }, type: i === 0 ? 'primary' : 'default',
+            value: { action_type: `opt_${i}`, session_state_key: stateKey },
+        }));
+        await this.sendCardJson(chatId, card2({ template: 'blue', title: '接回 claude 会话', elements: els }));
+    }
+
+    /** 接回菜单回调：opt_N → 重发该会话最新「Claude 完成」卡；空会话发报错卡 */
+    async handleCcback(notification, action_type, stateKey) {
+        const i = this.menuIndex(action_type);
+        if (i < 0) return;
+        const session = (notification.items || [])[i];
+        if (!session) return '选项无效';
+        this.state.removeNotification(stateKey);
+        const card = buildCompletionCard(launcher.sessionTranscript(session));
+        if (!card) {
+            await this.sendCardJson(notification.chat_id, card2({
+                template: 'red', title: '空会话',
+                elements: [{ tag: 'markdown', content: `<font color='grey'>${session}</font>\n该会话还没有任何输出` }],
+            }));
+            return '空会话';
+        }
+        await this.sendCardJson(notification.chat_id, card);
+        return '已回顾';
+    }
+
+    /** 启动成功后发带输入框的卡、绑定新会话终端——claude 刚启动 idle 不会自推，靠这张卡发第一条指令 */
+    async sendLaunchedCard(chatId, label, name) {
+        const stateKey = `feishu_${name}_${Date.now()}`;
+        this.state.addNotification(stateKey, {
+            session_id: name, notification_type: 'launched', pts_device: `tmux:${name}`, created_at: Date.now(),
+            responses: { esc: { keys: '\x1b', label: 'Esc' }, interrupt: { keys: '\x1b', label: '⛔ 中断' } },
+        });
+        await this.sendCardJson(chatId, card2({
+            template: 'green', title: `已启动 · ${label}`,
+            elements: [
+                { tag: 'markdown', content: `<font color='grey'>${name}</font>\n在下方直接发指令给它` },
+                inputEl(stateKey, '给新会话发指令...'),
+                escButton(stateKey),
+            ],
+        }));
+    }
+
+    /** 发消息到群：text → 纯文本，card → 交互卡片 */
+    sendText(chatId, text) { return this.send(chatId, 'text', JSON.stringify({ text })); }
+    sendCardJson(chatId, card) { return this.send(chatId, 'interactive', JSON.stringify(card)); }
+    async send(chatId, msgType, content) {
+        if (!chatId) return;
+        try {
+            await this.client.im.message.create({
+                params: { receive_id_type: 'chat_id' },
+                data: { receive_id: chatId, msg_type: msgType, content },
+            });
+        } catch (err) { console.error('[feishu-listener] 发送失败:', err.message); }
     }
 
     /**

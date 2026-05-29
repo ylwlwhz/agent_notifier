@@ -18,29 +18,9 @@ const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
 const { card2, statsTags, inputEl, buttonRow, footer, escFooterRow } = require('../lib/card');
 const { forEachTail, findTail, getAssistantText } = require('../lib/transcript-utils');
+const { fmtDuration, readOfficialStats } = require('../lib/session-stats');
 
 // ── 会话统计 ─────────────────────────────────────────────
-
-/** 时长 ms → 紧凑串（不到 1 分钟才显示秒，否则秒无意义） */
-function fmtDuration(ms) {
-    const total = Math.floor(ms / 1000);
-    const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
-    return h > 0 ? `${h}h${m}m` : m > 0 ? `${m}m` : `${s}s`;
-}
-
-/** 读 cost-capture.js 落盘的官方成本/时长；文件按完整 session_id 命名，多窗口互不干扰，无则 null */
-function readOfficialStats(sessionId) {
-    if (!sessionId) return null;
-    try {
-        const j = JSON.parse(fs.readFileSync(`/tmp/claude-cost-${sessionId}.json`, 'utf8'));
-        return {
-            costUSD: typeof j.cost === 'number' ? j.cost : null,
-            duration: typeof j.durationMs === 'number' ? fmtDuration(j.durationMs) : '',
-            contextPct: j.contextPct,
-            sessionName: j.sessionName,
-        };
-    } catch { return null; }
-}
 
 function parseSessionStats(transcriptPath) {
     if (!transcriptPath) return null;
@@ -406,6 +386,13 @@ async function main() {
     if (!event) return;
 
     if (!envConfig.getFeishuAppConfig().enabled) return;
+
+    // 登记 tmux 会话名 → 当前 transcript，供 ccback 按会话精确定位（同目录多会话也不混）。
+    // SessionStart 让会话一启动/clear/compact 就登记；空否交由 ccback 读 transcript 内容判断
+    const tmuxPts = resolvePtsDevice(process.ppid);
+    if (tmuxPts?.startsWith('tmux:') && data.transcript_path) {
+        try { fs.writeFileSync(`/tmp/claude-tmux-${tmuxPts.slice(5).split(':')[0]}.json`, JSON.stringify({ transcript: data.transcript_path })); } catch {}
+    }
 
     // 懒求值：优先用 statusLine 旁路落盘的官方成本/时长（与状态栏同源），无则回退 transcript 时长
     let statsVal, statsDone = false;
