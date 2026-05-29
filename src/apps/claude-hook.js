@@ -16,6 +16,7 @@ const { resolvePtsDevice } = require('../lib/terminal-inject');
 const Lark = require('@larksuiteoapi/node-sdk');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
+const { card2, statsTags, inputEl, escButton, buttonRow, footer } = require('../lib/card');
 const { forEachTail, findTail, getAssistantText } = require('../lib/transcript-utils');
 
 // ── 会话统计 ─────────────────────────────────────────────
@@ -135,51 +136,13 @@ function getProjectName(cwd) {
 
 // ── 卡片构建 ─────────────────────────────────────────────
 
-/** 构建输入框行（可选 Esc 按钮，通过 ENABLE_ESC_BUTTON=true 开启） */
-function buildInputRow(stateKey) {
-    const actions = [
-        {
-            tag: 'input',
-            name: 'user_input',
-            placeholder: { tag: 'plain_text', content: '输入指令...' },
-            width: 'fill',
-            value: { action_type: 'text_input', session_state_key: stateKey },
-        },
-    ];
-    actions.push({
-        tag: 'button',
-        text: { tag: 'plain_text', content: '⛔ ESC' },
-        type: 'danger',
-        size: 'small',
-        value: { action_type: 'interrupt', session_state_key: stateKey },
-    });
-    return { tag: 'action', actions };
-}
-
+/** Stop / StopFailure 卡：项目作副标题，时长/token 作 header 标签，正文 + 灰字 footer */
 function buildCard(title, body, template, projectName, stats, ptsDevice) {
-    const elements = parseMarkdownToElements(body);
-
-    elements.push(buildCardFooter({
-        host: 'claude',
-        ptsDevice,
-        projectName,
-        duration: stats?.duration || null,
-        tokens: stats ? {
-            inputTokens: stats.inputTokens,
-            outputTokens: stats.outputTokens,
-            cacheReadTokens: stats.cacheReadTokens,
-            cacheCreateTokens: stats.cacheCreateTokens,
-        } : null,
-    }));
-
-    return {
-        config: { wide_screen_mode: true },
-        header: {
-            title: { tag: 'plain_text', content: title },
-            template
-        },
-        elements
-    };
+    return card2({
+        template, title,
+        tags: statsTags(stats),
+        elements: [...parseMarkdownToElements(body), footer('claude', ptsDevice)],
+    });
 }
 
 // ── 事件处理 ─────────────────────────────────────────────
@@ -215,11 +178,11 @@ function handleStop(data, getStats, ptsDevice) {
     if (!delta) {
         if (slot) return null; // 无新增且已发过 → 跳过
         save();
-        return buildCard('✅ Claude 完成', '任务已完成，可以查看执行结果了', 'green', getProjectName(data.cwd), getStats(), ptsDevice);
+        return buildCard('Claude 完成', '任务已完成，可以查看执行结果了', 'green', getProjectName(data.cwd), getStats(), ptsDevice);
     }
     save();
     const shown = delta.length > STOP_BODY_MAX ? '…（仅显示最新部分）\n\n' + delta.slice(-STOP_BODY_MAX) : delta;
-    return buildCard('✅ Claude 完成', shown, 'green', getProjectName(data.cwd), getStats(), ptsDevice);
+    return buildCard('Claude 完成', shown, 'green', getProjectName(data.cwd), getStats(), ptsDevice);
 }
 
 function handleStopFailure(data, getStats, ptsDevice) {
@@ -236,7 +199,7 @@ function handleStopFailure(data, getStats, ptsDevice) {
     };
     const title = errorMap[error] || '异常退出';
 
-    return buildCard(`❌ ${title}`, details, 'red', getProjectName(data.cwd), getStats(), ptsDevice);
+    return buildCard(title, details, 'red', getProjectName(data.cwd), getStats(), ptsDevice);
 }
 
 // ── 飞书自建应用 API 发送卡片 ──────────────────────────────
@@ -300,7 +263,8 @@ async function sendFeishuAppCard(data, event, getStats) {
     // 在 footer（最后一个元素）前插入输入框，支持从卡片直接回话
     const sessionId = data.session_id || '';
     const stateKey = `feishu_${sessionId.substring(0, 8)}_${Date.now()}`;
-    card.elements.splice(Math.max(card.elements.length - 1, 0), 0, buildInputRow(stateKey));
+    const els = card.body.elements;
+    els.splice(Math.max(els.length - 1, 0), 0, inputEl(stateKey), escButton(stateKey));
 
     await sendCard(app, card, { stateKey, sessionId, type: event, ptsDevice });
 }
@@ -371,23 +335,6 @@ function buildPermissionButtons(parsedOptions) {
     return { buttons, responses };
 }
 
-/** 按钮组 + 行尾输入框，合并为一个 action 行 */
-function buildButtonRow(buttons, stateKey) {
-    const actions = buttons.map(b => ({
-        tag: 'button',
-        text: { tag: 'plain_text', content: b.text },
-        type: b.color === 'red' ? 'danger' : b.color === 'green' ? 'primary' : 'default',
-        value: { action_type: b.actionType, session_state_key: stateKey },
-    }));
-    actions.push({
-        tag: 'input', name: 'user_input',
-        placeholder: { tag: 'plain_text', content: '输入指令...' },
-        width: 'fill',
-        value: { action_type: 'text_input', session_state_key: stateKey },
-    });
-    return { tag: 'action', actions };
-}
-
 /** bypass 下 PreToolUse 不触发，从 transcript 检测 AskUserQuestion 并委托 claude-ask 发选择卡。已处理返 true */
 async function tryAskUserQuestion(app, data, { projectName, sessionPrefix, sessionId }) {
     const askInput = extractAskUserQuestion(data.transcript_path);
@@ -432,15 +379,18 @@ async function sendFeishuInteractiveCard(data, getStats) {
     const toolDesc = describeLatestTool(data.transcript_path, data.message || '需要你的操作');
     const { buttons, responses } = buildPermissionButtons(parsePermissionOptions(ptsDevice));
 
-    const card = {
-        config: { wide_screen_mode: true },
-        header: { title: { tag: 'plain_text', content: '🔐 权限确认' }, template: 'orange' },
+    const btns = buttons.map(b => ({ text: b.text, actionType: b.actionType, type: b.color === 'red' ? 'danger' : b.color === 'green' ? 'primary' : 'default' }));
+    const card = card2({
+        template: 'orange',
+        title: '权限确认',
+        tags: statsTags(getStats()),
         elements: [
             ...parseMarkdownToElements(toolDesc),
-            buildButtonRow(buttons, stateKey),
-            buildCardFooter({ host: 'claude', ptsDevice, projectName, duration: getStats()?.duration || null }),
+            buttonRow(btns, stateKey),
+            inputEl(stateKey),
+            footer('claude', ptsDevice),
         ],
-    };
+    });
     await sendCard(app, card, { stateKey, sessionId, type: data.notification_type || '', ptsDevice, responses });
 }
 

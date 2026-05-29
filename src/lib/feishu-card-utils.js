@@ -132,25 +132,16 @@ function buildMultiSelectCard(notification, stateKey) {
     const otherNum = options.length + 1;
     elements.push({ tag: 'markdown', content: `${question}\n\n${optList}\n**${otherNum}.** Other（自定义文本）\n\n输入编号（空格分隔），选 Other 加冒号写文本：\n如 \`1 3\` 或 \`1 ${otherNum}:我的文本\`` });
 
-    // 输入框
-    elements.push({ tag: 'action', actions: [{
-        tag: 'input',
-        name: 'multi_select_input',
+    // 输入框（schema 2.0：直接入 body，无 action 容器）
+    elements.push({
+        tag: 'input', name: 'multi_select_input',
         placeholder: { tag: 'plain_text', content: `如 1 3 或 1 ${otherNum}:自定义文本` },
-        width: 'fill',
         value: { action_type: 'submit_multi', session_state_key: stateKey },
-    }]});
+    });
 
     if (noteParts) elements.push({ tag: 'markdown', content: noteParts });
 
-    return {
-        config: { wide_screen_mode: true },
-        header: {
-            title: { tag: 'plain_text', content: '📋 多选' },
-            template: 'orange',
-        },
-        elements,
-    };
+    return require('./card').card2({ template: 'orange', icon: '', title: '多选', elements });
 }
 
 module.exports = { parseMarkdownToElements, buildFeishuTable, buildMultiSelectCard };

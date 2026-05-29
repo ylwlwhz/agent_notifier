@@ -16,6 +16,8 @@ const { injectKeys, injectText } = require('../lib/terminal-inject');
 const { createFeishuClient } = require('../channels/feishu/feishu-client');
 const { createFeishuInteractionHandler } = require('../channels/feishu/feishu-interaction-handler');
 const { createCodexInputBridge } = require('../adapters/codex/cli-input-bridge');
+const { selectCard, card2 } = require('../lib/card');
+const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 
 const WS_MAX_AGE_MS = parseInt(process.env.FEISHU_WS_MAX_AGE_MIN || '25', 10) * 60_000;
 const HEALTH_CHECK_INTERVAL_MS = 60_000;
@@ -364,37 +366,14 @@ class FeishuListener {
                 _note_parts: noteParts,
             });
 
-            // 发送卡片
-            const qCard = {
-                config: { wide_screen_mode: true },
-                header: {
-                    title: { tag: 'plain_text', content: `📋 ${q.header || '选择'} (${nextIdx + 1}/${totalQ})` },
-                    template: 'orange',
-                },
-                elements: [
-                    { tag: 'div', text: { tag: 'lark_md', content: q.question } },
-                    { tag: 'action', actions: [
-                        ...q.options.map((opt, optIdx) => ({
-                            tag: 'button',
-                            text: { tag: 'plain_text', content: opt.label },
-                            type: optIdx === 0 ? 'primary' : 'default',
-                            value: { action_type: `opt_${optIdx}`, session_state_key: newStateKey },
-                        })),
-                        { tag: 'button', text: { tag: 'plain_text', content: '💬 Other' }, type: 'default',
-                          value: { action_type: 'opt_other', session_state_key: newStateKey } },
-                        { tag: 'button', text: { tag: 'plain_text', content: '⛔ ESC' }, type: 'danger', size: 'small',
-                          value: { action_type: 'interrupt', session_state_key: newStateKey } },
-                    ]},
-                    { tag: 'action', actions: [{
-                        tag: 'input', name: 'user_input',
-                        placeholder: { tag: 'plain_text', content: '输入自定义回答...' },
-                        width: 'fill',
-                        value: { action_type: 'text_input', session_state_key: newStateKey },
-                    }]},
-                    { tag: 'hr' },
-                    { tag: 'markdown', content: noteParts },
-                ],
-            };
+            // 发送卡片（schema 2.0，与 claude-ask 同款 selectCard）
+            const qCard = selectCard({
+                title: `${q.header || '选择'} (${nextIdx + 1}/${totalQ})`,
+                question: q.question || '',
+                options: q.options.map(o => o.label),
+                stateKey: newStateKey, noteParts,
+                mdToEls: parseMarkdownToElements,
+            });
 
             try {
                 await this.client.im.message.create({
@@ -408,13 +387,11 @@ class FeishuListener {
         } else {
             // 所有问题已回答 — 所有答案在逐题 Enter 时已注入终端，此处仅发状态通知
             // 不存 sessionState、不带注入按钮，避免多注入一个 Enter 到错误上下文
-            const doneCard = {
-                config: { wide_screen_mode: true },
-                header: { title: { tag: 'plain_text', content: `✅ 全部已回答 (${totalQ} 题)` }, template: 'green' },
-                elements: [
-                    { tag: 'markdown', content: noteParts },
-                ],
-            };
+            const doneCard = card2({
+                template: 'green',
+                title: `全部已回答 (${totalQ} 题)`,
+                elements: [{ tag: 'markdown', content: noteParts }],
+            });
 
             try {
                 await this.client.im.message.create({

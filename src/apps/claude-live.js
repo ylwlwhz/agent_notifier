@@ -18,7 +18,7 @@
 const fs = require('fs');
 const path = require('path');
 require('../lib/env-config'); // 加载 .env
-const { buildCardFooter } = require('../lib/card-footer');
+const { card2, footer } = require('../lib/card');
 
 const KEY_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit']);
 
@@ -193,8 +193,13 @@ function buildSegmentCard(seg, projectName, capture) {
         ],
         rows,
     });
-    elements.push(buildCardFooter({ host: 'claude', projectName }));
-    return { config: { wide_screen_mode: true }, header: { title: { tag: 'plain_text', content: `⚡ 执行摘要（${seg.tools.length} 步）` }, template: 'blue' }, elements };
+    elements.push(footer('claude'));
+    return card2({
+        template: 'blue',
+        title: '执行摘要',
+        tags: [{ text: `${seg.tools.length} 步`, color: 'blue' }],
+        elements,
+    });
 }
 
 // ─── 模式 1：正常模式（PostToolUse hook 调用）────────────────────────────────

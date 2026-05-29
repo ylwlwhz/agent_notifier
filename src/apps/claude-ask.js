@@ -18,6 +18,7 @@ const { sessionState } = require('../lib/session-state');
 const { resolvePtsDevice } = require('../lib/terminal-inject');
 const { buildMultiSelectCard, parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
+const { selectCard } = require('../lib/card');
 
 // ── Utility functions ─────────────────────────────────────
 
@@ -147,61 +148,14 @@ async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notif
 
 /** Case B: single single-select question */
 async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts) {
-    const contextText = q._contextText || '';
-
-    const elements = [];
-
-    // Optional context block
-    if (contextText) {
-        elements.push(...parseMarkdownToElements(contextText));
-        elements.push({ tag: 'hr' });
-    }
-
-    // Question text
-    elements.push(...parseMarkdownToElements(q.question || ''));
-
-    // Option buttons + "Other" button
-    const optionButtons = q.options.map((opt, idx) => ({
-        tag: 'button',
-        text: { tag: 'plain_text', content: opt.label },
-        type: idx === 0 ? 'primary' : 'default',
-        value: { action_type: `opt_${idx}`, session_state_key: stateKey },
-    }));
-    optionButtons.push({
-        tag: 'button',
-        text: { tag: 'plain_text', content: '💬 Other' },
-        type: 'default',
-        value: { action_type: 'opt_other', session_state_key: stateKey },
+    const card = selectCard({
+        title: q.header || '方案选择',
+        contextText: q._contextText || '',
+        question: q.question || '',
+        options: q.options.map(o => o.label),
+        stateKey, noteParts,
+        mdToEls: parseMarkdownToElements,
     });
-    optionButtons.push({
-        tag: 'button',
-        text: { tag: 'plain_text', content: '⛔ ESC' },
-        type: 'danger',
-        size: 'small',
-        value: { action_type: 'interrupt', session_state_key: stateKey },
-    });
-    elements.push({ tag: 'action', actions: optionButtons });
-
-    // Text input for custom answer
-    elements.push({ tag: 'action', actions: [{
-        tag: 'input',
-        name: 'user_input',
-        placeholder: { tag: 'plain_text', content: '输入自定义回答...' },
-        width: 'fill',
-        value: { action_type: 'text_input', session_state_key: stateKey },
-    }]});
-
-    // Footer note
-    elements.push({ tag: 'markdown', content: noteParts });
-
-    const card = {
-        config: { wide_screen_mode: true },
-        header: {
-            title: { tag: 'plain_text', content: `📋 ${q.header || '方案选择'}` },
-            template: 'orange',
-        },
-        elements,
-    };
 
     // Build responses map — Claude Code TUI 使用箭头键导航，不接受数字选择
     // opt_0 (第一个，默认高亮): 直接 Enter
@@ -266,45 +220,14 @@ async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, s
         _note_parts: noteParts,
     });
 
-    const qElements = [];
-
-    if (contextText) {
-        qElements.push(...parseMarkdownToElements(contextText));
-        qElements.push({ tag: 'hr' });
-    }
-
-    qElements.push(
-        { tag: 'div', text: { tag: 'lark_md', content: q.question } },
-        { tag: 'action', actions: [
-            ...q.options.map((opt, optIdx) => ({
-                tag: 'button',
-                text: { tag: 'plain_text', content: opt.label },
-                type: optIdx === 0 ? 'primary' : 'default',
-                value: { action_type: `opt_${optIdx}`, session_state_key: stateKey },
-            })),
-            { tag: 'button', text: { tag: 'plain_text', content: '💬 Other' }, type: 'default',
-              value: { action_type: 'opt_other', session_state_key: stateKey } },
-            { tag: 'button', text: { tag: 'plain_text', content: '⛔ ESC' }, type: 'danger', size: 'small',
-              value: { action_type: 'interrupt', session_state_key: stateKey } },
-        ]},
-        { tag: 'action', actions: [{
-            tag: 'input', name: 'user_input',
-            placeholder: { tag: 'plain_text', content: '输入自定义回答...' },
-            width: 'fill',
-            value: { action_type: 'text_input', session_state_key: stateKey },
-        }]},
-        { tag: 'hr' },
-        { tag: 'markdown', content: noteParts },
-    );
-
-    const qCard = {
-        config: { wide_screen_mode: true },
-        header: {
-            title: { tag: 'plain_text', content: `📋 ${q.header || '选择'} (1/${questions.length})` },
-            template: 'orange',
-        },
-        elements: qElements,
-    };
+    const qCard = selectCard({
+        title: `${q.header || '选择'} (1/${questions.length})`,
+        contextText,
+        question: q.question || '',
+        options: q.options.map(o => o.label),
+        stateKey, noteParts,
+        mdToEls: parseMarkdownToElements,
+    });
 
     try {
         await app.client.im.message.create({
