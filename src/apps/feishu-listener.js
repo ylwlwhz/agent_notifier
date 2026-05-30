@@ -140,7 +140,6 @@ class FeishuListener {
     async handleCardAction(data) {
         const action = data?.action;
         console.log('[feishu-listener] 收到回调 action_type:', action?.value?.action_type, 'key:', action?.value?.session_state_key?.substring(0, 20));
-        console.log('[feishu-listener] data keys:', Object.keys(data || {}));
         if (!action || !action.value) {
             console.log('[feishu-listener] 收到无效的卡片回调');
             return;
@@ -189,7 +188,7 @@ class FeishuListener {
             const optMatch = /^opt_(\d+)$/.exec(action_type || '');
             if (action.input_value || optMatch) {
                 const answers = action.input_value ? { q0_other: action.input_value } : { q0: optMatch[1] };
-                this.state.removeNotification(session_state_key); // 先移除防重发重入，再后台回放
+                this.state.removeNotification(session_state_key); // 提交即完成，先移除（兼防重复投递），后台回放
                 this.replayInBackground(notification.pts_device, notification._questions, answers);
                 return action.input_value ? '已发送' : '已选择';
             }
@@ -395,8 +394,8 @@ class FeishuListener {
         const bad = firstUnanswered(fv, qs); // 某题未答则该 tab 无法前进/提交，先拦下
         if (bad >= 0) return `请回答第 ${bad + 1} 题`;
 
-        // 回放耗时（多选自定义/多题可达 ~10s），而飞书回调须秒级响应、否则超时重发并打断；
-        // 故先移除（防重发重入），再后台异步回放、立即返回 toast
+        // 提交后该卡即完成，先移除（兼防飞书 at-least-once 的重复投递）；
+        // 回放耗时（多选自定义/多题 ~10s）而飞书回调须秒级响应、否则超时打断，故 fire-and-forget 后台回放、立即返回
         this.state.removeNotification(stateKey);
         this.replayInBackground(notification.pts_device, qs, fv);
         return '已提交';

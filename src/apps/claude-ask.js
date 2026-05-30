@@ -8,9 +8,8 @@
  */
 
 const fs = require('fs');
-const path = require('path');
 const Lark = require('@larksuiteoapi/node-sdk');
-const { envConfig } = require('../lib/env-config');
+require('../lib/env-config');
 const { sessionState } = require('../lib/session-state');
 const { resolvePtsDevice } = require('../lib/terminal-inject');
 const { buildQuestionsForm, buildSingleSelectCard } = require('../lib/feishu-card-utils');
@@ -26,26 +25,6 @@ function readStdin() {
         process.stdin.on('data', chunk => data += chunk);
         process.stdin.on('end', () => { try { done(JSON.parse(data)); } catch { done({}); } });
         setTimeout(() => done({}), 3000).unref();
-    });
-}
-
-function getProjectName(cwd) {
-    if (!cwd) return '';
-    try {
-        const pkgPath = path.join(cwd, 'package.json');
-        if (fs.existsSync(pkgPath)) {
-            const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-            if (pkg.name) return pkg.name;
-        }
-    } catch {}
-    return path.basename(cwd);
-}
-
-function getTimestamp() {
-    return new Date().toLocaleString('zh-CN', {
-        hour12: false,
-        year: 'numeric', month: '2-digit', day: '2-digit',
-        hour: '2-digit', minute: '2-digit', second: '2-digit'
     });
 }
 
@@ -142,18 +121,6 @@ function sendQuestionsForm(app, questions, stateKey, ptsDevice, sessionId, notif
 async function main() {
     const data = await readStdin();
 
-    // 诊断日志
-    const logLine = JSON.stringify({
-        ts: Date.now(),
-        event: data.hook_event_name,
-        tool: data.tool_name,
-        hasQuestions: Array.isArray(data.tool_input?.questions),
-        qCount: data.tool_input?.questions?.length,
-        inputType: typeof data.tool_input,
-        inputKeys: data.tool_input ? Object.keys(data.tool_input) : null,
-    });
-    fs.appendFileSync('/tmp/ask-handler-diag.log', logLine + '\n');
-
     // Guard: only handle PreToolUse / AskUserQuestion
     if (data.hook_event_name !== 'PreToolUse') return;
     if (data.tool_name !== 'AskUserQuestion') return;
@@ -194,8 +161,6 @@ if (require.main === module) {
 
 module.exports = {
     getFeishuAppClient,
-    getProjectName,
-    getTimestamp,
     sendSingleSelectCard,
     sendQuestionsForm,
     main,
