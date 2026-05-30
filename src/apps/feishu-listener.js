@@ -406,28 +406,30 @@ class FeishuListener {
         this.state.removeNotification(stateKey);
         const card = buildCompletionCard(launcher.sessionTranscript(session));
         if (!card) {
-            await this.sendCardJson(notification.chat_id, card2({
-                template: 'red', title: '空会话',
-                elements: [{ tag: 'markdown', content: `<font color='grey'>${session}</font>\n该会话还没有任何输出` }],
-            }));
+            // 空会话不发死卡，照样给对话框 + 中断 + 终端 id，可直接接回
+            await this.sendLaunchedCard(notification.chat_id, session, session, {
+                template: 'blue', title: `接回 · ${session}`, intro: '该会话还没有输出，可在下方直接发指令接回',
+            });
             return '空会话';
         }
         await this.sendCardJson(notification.chat_id, card);
         return '已回顾';
     }
 
-    /** 启动成功后发带输入框的卡、绑定新会话终端——claude 刚启动 idle 不会自推，靠这张卡发第一条指令 */
-    async sendLaunchedCard(chatId, label, name) {
+    /** 发带输入框的卡、绑定会话终端——新启动会话靠它发第一条指令，ccback 空会话靠它接回。
+     *  opts: { template, title, intro } 覆盖默认（启动场景） */
+    async sendLaunchedCard(chatId, label, name, opts = {}) {
+        const { template = 'green', title = `已启动 · ${label}`, intro = '在下方直接发指令给它' } = opts;
         const stateKey = `feishu_${name}_${Date.now()}`;
         this.state.addNotification(stateKey, {
             session_id: name, notification_type: 'launched', pts_device: `tmux:${name}`, created_at: Date.now(),
             responses: { esc: { keys: '\x1b', label: 'Esc' }, interrupt: { keys: '\x1b', label: '⛔ 中断' } },
         });
         await this.sendCardJson(chatId, card2({
-            template: 'green', title: `已启动 · ${label}`,
+            template, title,
             elements: [
-                { tag: 'markdown', content: '在下方直接发指令给它' },
-                inputEl(stateKey, '给新会话发指令...'),
+                { tag: 'markdown', content: intro },
+                inputEl(stateKey, '给会话发指令...'),
                 escFooterRow(stateKey, `tmux:${name}`), // 中断 + 右侧终端 id
             ],
         }));
