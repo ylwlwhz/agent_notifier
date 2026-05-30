@@ -17,6 +17,7 @@ const { createFeishuClient } = require('../channels/feishu/feishu-client');
 const { createFeishuInteractionHandler } = require('../channels/feishu/feishu-interaction-handler');
 const { createCodexInputBridge } = require('../adapters/codex/cli-input-bridge');
 const { card2, inputEl, escFooterRow } = require('../lib/card');
+const { buildSubmittedCard } = require('../lib/feishu-card-utils');
 const { firstUnanswered } = require('../lib/askq-replay');
 const { spawn } = require('child_process');
 const path = require('path');
@@ -99,11 +100,11 @@ class FeishuListener {
             'card.action.trigger': async (data) => {
                 this.lastEventTime = Date.now();
                 const result = await this.handleCardAction(data);
-                // 其他操作弹 toast
+                // 返回 {card,label} → 局部刷新该卡（card 须包成 {type:'raw',data}）+ toast；否则仅 toast
                 if (result && typeof result === 'object' && result.card) {
                     return {
                         toast: { type: 'success', content: result.label || '已操作' },
-                        card: result.card,
+                        card: { type: 'raw', data: result.card },
                     };
                 }
                 return {
@@ -192,7 +193,8 @@ class FeishuListener {
                 const answers = action.input_value ? { q0_other: action.input_value } : { q0: optMatch[1] };
                 this.state.removeNotification(session_state_key); // 提交即完成，先移除（兼防重复投递），后台回放
                 this.replayInBackground(notification.pts_device, notification._questions, answers);
-                return action.input_value ? '已发送' : '已选择';
+                const card = buildSubmittedCard(notification._questions, answers, notification.pts_device);
+                return { card, label: action.input_value ? '已发送' : '已选择' };
             }
         }
 
@@ -400,7 +402,7 @@ class FeishuListener {
         // 回放耗时（多选自定义/多题 ~10s）而飞书回调须秒级响应、否则超时打断，故 fire-and-forget 后台回放、立即返回
         this.state.removeNotification(stateKey);
         this.replayInBackground(notification.pts_device, qs, fv);
-        return '已提交';
+        return { card: buildSubmittedCard(qs, fv, notification.pts_device), label: '已提交' };
     }
 
     /** 回放交给 detached 子进程跑（根因详见 replay-worker.js）：主进程派出后立即空闲，

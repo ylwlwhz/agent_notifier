@@ -169,4 +169,22 @@ function buildSingleSelectCard(q, stateKey, ptsDevice) {
     return card2({ template: 'orange', icon: 'list_outlined', title: q.header || '方案选择', elements: els });
 }
 
-module.exports = { parseMarkdownToElements, buildFeishuTable, buildQuestionsForm, buildSingleSelectCard };
+/**
+ * 提交完成卡（回调局部刷新）：把用户在飞书选/填的答案回显成绿色「已提交」卡，点完即时反馈、
+ * 不依赖后续 patch。answers 兼容单选 {q0:"1"}、单选自定义 {q0_other:"…"}、多题 form_value 全量。
+ * @param {Array<{header,options:string[],optionCount,multiSelect}>} questions - 即登记的 _questions（含选项 label）
+ */
+function buildSubmittedCard(questions, answers, ptsDevice) {
+    const { card2, footer } = require('./card');
+    const { selectedIndices } = require('./askq-replay');
+    const lines = questions.map((q, i) => {
+        const picks = selectedIndices(answers, i, q.optionCount, q.multiSelect).map(idx => q.options?.[idx] ?? `#${idx}`);
+        const other = (answers[`q${i}_other`] || '').trim();
+        if (other) picks.push(other);
+        return `${q.header ? `**${q.header}**　` : ''}${picks.join('、') || '—'}`;
+    });
+    const els = [{ tag: 'markdown', content: lines.join('\n') }, footer('', ptsDevice)];
+    return card2({ template: 'green', icon: 'yes_outlined', title: '已提交', elements: els }); // 对勾交给 header 绿色图标
+}
+
+module.exports = { parseMarkdownToElements, buildFeishuTable, buildQuestionsForm, buildSingleSelectCard, buildSubmittedCard };

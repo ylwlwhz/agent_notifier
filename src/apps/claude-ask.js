@@ -84,8 +84,8 @@ async function getFeishuAppClient() {
 
 // ── Card senders ──────────────────────────────────────────
 
-// 回放元数据只需每题的「单/多选 + 选项数」；esc/interrupt 中断键所有卡通用
-const replayMeta = q => ({ multiSelect: !!q.multiSelect, optionCount: q.options.length });
+// 回放元数据：单/多选 + 选项数（回放算键序用）+ header/选项 label（提交回显卡用）；中断键所有卡通用
+const replayMeta = q => ({ multiSelect: !!q.multiSelect, optionCount: q.options.length, header: q.header || q.question || '', options: q.options.map(o => o.label) });
 
 /** 发卡 + 登记回放 state；meta 区分卡型（_single_select / _questions_form）*/
 async function sendCard(app, card, stateKey, ptsDevice, sessionId, notificationType, meta) {

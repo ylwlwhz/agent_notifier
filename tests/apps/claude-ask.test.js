@@ -41,12 +41,12 @@ test('sendQuestionsForm：单题/多题统一发一张 form 卡，并存回放�
   assert.equal(inputs.length, 2);
   assert.deepEqual(inputs.map(i => i.name), ['q0_other', 'q1_other']);
 
-  // 存了回放所需的精简元数据
+  // 存了回放元数据（单/多选 + 选项数）及提交回显卡所需的 header/选项 label
   const notif = sessionState.getNotification('state-form');
   assert.equal(notif._questions_form, true);
   assert.deepEqual(notif._questions, [
-    { multiSelect: false, optionCount: 2 },
-    { multiSelect: true, optionCount: 3 },
+    { multiSelect: false, optionCount: 2, header: '方案', options: ['A', 'B'] },
+    { multiSelect: true, optionCount: 3, header: '水果', options: ['苹果', '梨', '桃'] },
   ]);
   sessionState.removeNotification('state-form');
 });

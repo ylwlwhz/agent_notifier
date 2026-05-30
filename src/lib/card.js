@@ -62,7 +62,8 @@ function termLabel(ptsDevice) {
     return (t.startsWith('tmux:') ? t.slice(5) : t.replace('/dev/', '')).replace(/:0\.0$/, '');
 }
 
-/** footer：仅留终端 id（多会话分辨用）；无终端则不要 footer。host/时间/项目都去掉，飞书自带消息时间 */
+/** footer：仅留终端 id（多会话分辨用）灰字；无终端则不要 footer。
+ *  （schema 2.0 已移除 note 元素，小灰字只能用 markdown+font 实现）*/
 function footer(host, ptsDevice) {
     const term = termLabel(ptsDevice);
     if (!term) return null;
