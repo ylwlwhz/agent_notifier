@@ -18,6 +18,7 @@ const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { card2, statsTags, inputEl, buttonRow, footer, escFooterRow } = require('../lib/card');
 const { forEachTail, findTail, getAssistantText } = require('../lib/transcript-utils');
 const { fmtDuration, readOfficialStats } = require('../lib/session-stats');
+const { KEY_TOOLS } = require('../lib/key-tools');
 
 // ── 会话统计 ─────────────────────────────────────────────
 
@@ -127,15 +128,16 @@ function buildCard(title, body, template, stats) {
 const STOP_BODY_MAX = 6000; // 飞书卡片 content 上限约 30KB，body 留足余量兜底极端单轮
 
 function handleStop(data, getStats) {
-    // 只收「最近一次 tool_use 之后」的 text：之前的 narration 已由蓝色 live 卡显示，避免重复
+    // 只收「最近一次关键工具之后」的 text：之前的 narration 已由蓝色 live 卡显示，避免重复。
+    // 边界须与 live 卡同认 KEY_TOOLS——非关键工具(Read/Grep)不算边界，否则夹在它前面的话两头落空被吞。
     // （无工具的纯文本 turn 收到 user prompt 边界 = 全部）。last_assistant_message 补未 flush 的尾段
     const texts = [];
-    let boundaryTs = 0; // 停下来的边界 ts（最近一次 tool_use，或无工具时的 user prompt），作去重 epoch
+    let boundaryTs = 0; // 停下来的边界 ts（最近一次关键工具，或无工具时的 user prompt），作去重 epoch
     forEachTail(data.transcript_path, (d) => {
         const ts = +new Date(d.timestamp || 0);
         if (d.type === 'user' && typeof d.message?.content === 'string') { boundaryTs = ts; return true; }
         if (d.type !== 'assistant') return false;
-        if ((d.message?.content || []).some(b => b.type === 'tool_use')) { boundaryTs = ts; return true; }
+        if ((d.message?.content || []).some(b => b.type === 'tool_use' && KEY_TOOLS.has(b.name))) { boundaryTs = ts; return true; }
         const text = getAssistantText(d);
         if (text) texts.unshift(text);
         return false;

@@ -1,3 +1,3 @@
 'use strict';
 
-require('./src/apps/claude-live');
+require('./src/apps/claude-live').run();

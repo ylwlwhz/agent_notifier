@@ -11,8 +11,8 @@
  *     results — 工具执行结果（前 5 行）
  *   FEISHU_LIVE_DEBOUNCE_MS=3000   debounce 延迟（毫秒，默认 3000）
  *
- * 触发工具（关键节点，只读操作不触发）:
- *   Bash / Write / Edit / NotebookEdit
+ * 触发并展示的工具（关键节点；Read/Grep 等纯本地只读不触发，避免刷屏）:
+ *   Bash / Write / Edit / NotebookEdit / WebSearch / WebFetch
  */
 
 const fs = require('fs');
@@ -20,29 +20,36 @@ const path = require('path');
 require('../lib/env-config'); // 加载 .env
 const { card2, termLabel } = require('../lib/card');
 const { resolvePtsDevice } = require('../lib/terminal-inject');
-
-const KEY_TOOLS = new Set(['Bash', 'Write', 'Edit', 'NotebookEdit']);
+const { KEY_TOOLS } = require('../lib/key-tools');
 
 const TOOL_ICONS = {
     'Bash': '⚡',
     'Write': '📝',
     'Edit': '✏️',
     'NotebookEdit': '📓',
+    'WebSearch': '🔍',
+    'WebFetch': '🌐',
 };
 
-// ─── Flush 模式：在文件最开始检测，不走 main() ───────────────────────────────
+// ─── 入口分发 ─────────────────────────────────────────────────────────────────
 
-if (process.argv[2] === '--flush') {
-    flushBuffer(process.argv[3]).catch(err => {
-        console.error('[live/flush] 错误:', err.message);
-        process.exit(0);
-    });
-} else {
-    main().catch(err => {
-        console.error('[live] 错误:', err.message);
-        process.exit(0);
-    });
+/** --flush 跑 flush 子进程，否则跑 PostToolUse 主流程。
+ *  hook 经 live-handler.js（require 本模块）调用，故不靠 require.main 自动执行——由调用方显式 run()。 */
+function run() {
+    if (process.argv[2] === '--flush') {
+        flushBuffer(process.argv[3]).catch(err => {
+            console.error('[live/flush] 错误:', err.message);
+            process.exit(0);
+        });
+    } else {
+        main().catch(err => {
+            console.error('[live] 错误:', err.message);
+            process.exit(0);
+        });
+    }
 }
+
+if (require.main === module) run(); // 直接 node claude-live.js / flush 子进程；被 require 时由调用方触发
 
 // ─── 辅助函数 ─────────────────────────────────────────────────────────────────
 
@@ -99,6 +106,10 @@ function formatToolInput(toolName, toolInput) {
             return `编辑 ${toolInput.file_path || ''}`;
         case 'NotebookEdit':
             return `编辑 ${toolInput.notebook_path || ''}`;
+        case 'WebSearch':
+            return (toolInput.query || '');
+        case 'WebFetch':
+            return (toolInput.url || '');
         default:
             return JSON.stringify(toolInput);
     }
@@ -128,7 +139,7 @@ function formatToolResult(toolResponse) {
 
 // ─── 执行摘要卡构建 ───────────────────────────────────────────────────────────
 
-const TOOL_COLOR = { Bash: 'blue', Edit: 'green', Write: 'orange', Read: 'grey', NotebookEdit: 'purple' };
+const TOOL_COLOR = { Bash: 'blue', Edit: 'green', Write: 'orange', Read: 'grey', NotebookEdit: 'purple', WebSearch: 'violet', WebFetch: 'turquoise' };
 
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h; }
 
@@ -153,8 +164,10 @@ function reconstructSegments(transcriptPath) {
         if (d.type === 'assistant') {
             for (const b of d.message?.content || []) {
                 if (b.type === 'text' && b.text?.trim()) {
-                    cur = { text: b.text.trim(), tools: [] };
-                    segments.push(cur);
+                    // 连续多段文字累积进同一段（不吞文字）；只有已挂过工具后再出现的文字才另起一段
+                    if (cur && cur.tools.length) cur = null;
+                    if (!cur) { cur = { text: '', tools: [] }; segments.push(cur); }
+                    cur.text = cur.text ? `${cur.text}\n\n${b.text.trim()}` : b.text.trim();
                 } else if (b.type === 'tool_use' && KEY_TOOLS.has(b.name)) {
                     if (!cur) { cur = { text: '', tools: [] }; segments.push(cur); }
                     cur.tools.push({ tool: b.name, icon: TOOL_ICONS[b.name] || '🔧', input: formatToolInput(b.name, b.input), id: b.id });
@@ -336,3 +349,5 @@ async function flushBuffer(bufferPath) {
     sessionState.data[stateKey] = { turnTs, cards, created_at: Date.now() };
     sessionState.save();
 }
+
+module.exports = { run, reconstructSegments, formatToolInput, parseCaptureConfig, KEY_TOOLS };
