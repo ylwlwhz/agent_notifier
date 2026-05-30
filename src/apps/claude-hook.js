@@ -125,7 +125,8 @@ function buildCard(title, body, template, stats) {
 
 // ── 事件处理 ─────────────────────────────────────────────
 
-const STOP_BODY_MAX = 6000; // 飞书卡片 content 上限约 30KB，body 留足余量兜底极端单轮
+// 飞书单卡硬限实测 ~150KB（API code 230025），30000 字（中文最坏 ~90KB）仍稳；仅兜底极端单轮。
+const STOP_BODY_MAX = 30000;
 
 function handleStop(data, getStats) {
     // 只收「最近一次关键工具之后」的 text：之前的 narration 已由蓝色 live 卡显示，避免重复。

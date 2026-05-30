@@ -60,6 +60,39 @@ test('buildSegmentCard：每个工具一张折叠面板（非表格）；Bash �
   assert.ok(!editBody.includes('updated successfully'), '写改类的套话结果应隐藏');
 });
 
+test('buildSegmentCard：常规多行内容全文展示，不再砍成 15 行', () => {
+  const cmd = Array.from({ length: 40 }, (_, i) => `echo ${i}`).join('\n'); // 40 行远超旧的 15 行硬截
+  const seg = { text: '', tools: [{ tool: 'Bash', icon: '⌘', input: 'big', raw: { command: cmd }, result: '' }] };
+  const card = buildSegmentCard(seg, 'p', { tools: true, output: true, results: true }, 'tmux:x');
+  const body = JSON.stringify(card);
+  assert.ok(body.includes('echo 39'), '第 40 行也应在卡内（未被 15 行截断）');
+  assert.ok(!body.includes('已截断'), '常规体量不应触发截断提示');
+});
+
+test('buildSegmentCard：超 56 字的单行命令/URL，标题截断但正文兜底全文（不丢内容）', () => {
+  const longCmd = 'curl -sSL https://example.com/very/long/path?a=1\\&b=2\\&c=3\\&d=4\\&e=5 | jq .data'; // >56 单行
+  const longUrl = 'https://example.com/some/really/long/article/path/that/exceeds/fifty-six-characters';
+  const seg = { text: '', tools: [
+    { tool: 'Bash', icon: '⌘', input: longCmd, raw: { command: longCmd }, result: '' },
+    { tool: 'WebFetch', icon: '🌐', input: longUrl, raw: { url: longUrl }, result: '' },
+  ] };
+  const card = buildSegmentCard(seg, 'p', { tools: true, output: true, results: true }, 'tmux:x');
+  const panels = card.body.elements.filter(el => el.tag === 'collapsible_panel');
+  // 标题是预览（被截断带省略号），正文兜底完整内容
+  assert.ok(panels[0].header.title.content.includes('…'), 'Bash 标题应为截断预览');
+  assert.ok(panels[0].elements.some(e => e.content.includes('jq .data')), 'Bash 完整命令应在正文兜底');
+  assert.ok(panels[1].elements.some(e => e.content.includes('fifty-six-characters')), 'WebFetch 完整 URL 应在正文兜底');
+});
+
+test('buildSegmentCard：病态超大内容回退裁剪到飞书硬上限内，并诚实标注', () => {
+  const huge = Array.from({ length: 8000 }, (_, i) => `${i} │ line ${i}`).join('\n'); // ~数百 KB，超 150KB 硬限
+  const seg = { text: '', tools: [{ tool: 'Bash', icon: '⌘', input: 'huge', raw: { command: huge }, result: '' }] };
+  const card = buildSegmentCard(seg, 'p', { tools: true, output: true, results: true }, 'tmux:x');
+  const bytes = Buffer.byteLength(JSON.stringify(card), 'utf8');
+  assert.ok(bytes <= 120 * 1024, `整卡应裁到硬上限下，实测 ${bytes} 字节`);
+  assert.ok(JSON.stringify(card).includes('已截断，超出飞书单卡'), '裁剪时应诚实标注');
+});
+
 test('clipLines：保留前 n 行（多行不再只剩第一行），超出补省略号、去尾部空白', () => {
   assert.equal(clipLines('a\nb\nc', 5), 'a\nb\nc');   // 未超 → 原样保留多行
   assert.equal(clipLines('a\nb\nc\nd', 2), 'a\nb\n…'); // 超出 → 截断 + 省略号

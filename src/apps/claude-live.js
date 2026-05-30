@@ -8,7 +8,7 @@
  *   FEISHU_LIVE_CAPTURE=tools,output,results  精细控制
  *     tools   — 工具名 + 关键参数（命令、文件路径）
  *     output  — Claude 上一段助手文字
- *     results — 工具执行结果（折叠面板内展开查看，过长截断）
+ *     results — 工具执行结果（折叠面板内展开查看，全文；仅整卡逼近 ~150KB 硬上限时回退裁剪）
  *   FEISHU_LIVE_DEBOUNCE_MS=700    debounce 延迟（毫秒，默认 700）
  *
  * 触发并展示的工具集（含哪些、为何排除某些）见 lib/key-tools.js。
@@ -203,8 +203,7 @@ function reconstructSegments(transcriptPath) {
     return { turnTs, segments };
 }
 
-const MAX_CMD_LINES = 15, MAX_RES_LINES = 15;
-/** 取前 n 行，超出补省略号、去尾部空白 */
+/** 取前 n 行，超出补省略号、去尾部空白（保留的通用裁行工具） */
 function clipLines(text, n) {
     const lines = String(text).split('\n');
     const head = lines.slice(0, n).join('\n').trimEnd();
@@ -216,6 +215,38 @@ function clipChars(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1
 /** markdown 代码块元素（面板内可正常渲染，表格单元不能） */
 const codeBlock = (text, lang = '') => ({ tag: 'markdown', content: '```' + lang + '\n' + text + '\n```' });
 
+// 飞书单卡硬限实测 ~150KB（API code 230025，160KB 起拒），30KB 文档值仅软建议。故默认全文，
+// 仅整卡逼近硬限时回退裁剪；预算留余量到 110KB（中文多字节 + patch 开销）。
+const CARD_BYTE_BUDGET = 110 * 1024;
+const cardBytes = card => Buffer.byteLength(JSON.stringify(card), 'utf8');
+
+/** 把 ```lang\n…\n``` 代码块按行裁到 keepLines，并加诚实截断提示 */
+function reclipFence(content, keepLines) {
+    const m = content.match(/^```([^\n]*)\n([\s\S]*)\n```$/);
+    if (!m) return content;
+    const lang = m[1], lines = m[2].split('\n');
+    if (lines.length <= keepLines) return content;
+    const kept = lines.slice(0, Math.max(1, keepLines)).join('\n');
+    return '```' + lang + '\n' + kept + `\n…（剩余 ${lines.length - keepLines} 行已截断，超出飞书单卡 ~150KB 上限）\n` + '```';
+}
+
+/** 整卡逼近硬上限时，反复挑当前最大的代码块按行减半，直到进预算（正常用例从不触发） */
+function fitCardBudget(card) {
+    if (cardBytes(card) <= CARD_BYTE_BUDGET) return card;
+    const blocks = [];
+    (function walk(els) { for (const el of els || []) { if (el.tag === 'markdown' && el.content.startsWith('```')) blocks.push(el); walk(el.elements); } })(card.body.elements);
+    let guard = 0;
+    while (cardBytes(card) > CARD_BYTE_BUDGET && guard++ < 500) {
+        blocks.sort((a, b) => b.content.length - a.content.length);
+        const big = blocks[0];
+        if (!big) break;
+        const n = big.content.split('\n').length;
+        if (n <= 3) break; // 围栏 2 行 + 至少 1 行内容，无可再裁
+        big.content = reclipFence(big.content, Math.floor((n - 2) / 2));
+    }
+    return card;
+}
+
 // 这些工具的「结果」是套话（"updated successfully"…），隐藏，改在正文展示真实改动
 const NOISY_RESULT = new Set(['Edit', 'Write', 'NotebookEdit']);
 
@@ -225,16 +256,16 @@ function toolDetail(e) {
     switch (e.tool) {
         case 'Edit': {
             if (!r.old_string && !r.new_string) return [];
-            const o = clipLines(r.old_string || '', MAX_CMD_LINES).split('\n').map(l => `- ${l}`);
-            const n = clipLines(r.new_string || '', MAX_CMD_LINES).split('\n').map(l => `+ ${l}`);
+            const o = (r.old_string || '').split('\n').map(l => `- ${l}`);
+            const n = (r.new_string || '').split('\n').map(l => `+ ${l}`);
             return [codeBlock([...o, ...n].join('\n'), 'diff')];
         }
         case 'Write':
-            return r.content ? [codeBlock(clipLines(r.content, MAX_CMD_LINES))] : [];
+            return r.content ? [codeBlock(r.content)] : [];
         case 'NotebookEdit':
-            return r.new_source ? [codeBlock(clipLines(r.new_source, MAX_CMD_LINES))] : [];
+            return r.new_source ? [codeBlock(r.new_source)] : [];
         case 'Bash':
-            return (r.command || '').includes('\n') ? [codeBlock(clipLines(r.command, MAX_CMD_LINES), 'bash')] : []; // 单行已在标题
+            return (r.command || '').includes('\n') ? [codeBlock(r.command, 'bash')] : []; // 单行已在标题
         default:
             return [];
     }
@@ -242,14 +273,20 @@ function toolDetail(e) {
 
 /** 一个工具 → 一张折叠面板：折叠时一行（图标+工具+命令首行），展开看改动详情 + 输出 */
 function toolPanel(e, capture) {
-    const first = capture.tools && e.input
-        ? clipChars(e.input.split('\n')[0].replace(/^(写入|编辑) /, ''), 56).replace(/`/g, "'")
-        : '';
-    const title = `**${e.icon} ${e.tool}**${first ? `　\`${first}\`` : ''}`;
+    const fullFirst = capture.tools && e.input ? e.input.split('\n')[0].replace(/^(写入|编辑) /, '') : '';
+    const preview = clipChars(fullFirst, 56).replace(/`/g, "'"); // 标题 56 字仅作预览，全文由下方兜底
+    const title = `**${e.icon} ${e.tool}**${preview ? `　\`${preview}\`` : ''}`;
 
     const body = [];
     if (capture.tools) body.push(...toolDetail(e));
-    if (capture.results && e.result && !NOISY_RESULT.has(e.tool)) body.push(codeBlock(clipLines(e.result.trim(), MAX_RES_LINES)));
+    // 首行被预览截断且 toolDetail 未带出完整输入（Bash 多行已展示）→ 补全，避免长命令/URL 丢内容
+    const bashMultiline = e.tool === 'Bash' && (e.raw?.command || '').includes('\n');
+    if (capture.tools && fullFirst.length > 56 && !bashMultiline) {
+        body.unshift(e.tool === 'Bash'
+            ? codeBlock(e.raw?.command || fullFirst, 'bash')
+            : { tag: 'markdown', content: '`' + fullFirst.replace(/`/g, "'") + '`' });
+    }
+    if (capture.results && e.result && !NOISY_RESULT.has(e.tool)) body.push(codeBlock(e.result.trim()));
     if (!body.length) body.push({ tag: 'markdown', content: "<font color='grey'>（无输出）</font>" });
 
     return {
@@ -264,16 +301,16 @@ function toolPanel(e, capture) {
 function buildSegmentCard(seg, projectName, capture, ptsDevice) {
     const elements = [];
     if (capture.output && seg.text) {
-        elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: `❯ ${termLabel(ptsDevice) || 'Claude'}` } }, elements: [{ tag: 'markdown', content: seg.text }] });
+        elements.push({ tag: 'collapsible_panel', expanded: true, header: { title: { tag: 'plain_text', content: `❯ ${termLabel(ptsDevice) || 'Claude'}` } }, elements: [{ tag: 'markdown', content: seg.text }] });
         elements.push({ tag: 'hr' });
     }
     for (const e of seg.tools) elements.push(toolPanel(e, capture));
-    return card2({
+    return fitCardBudget(card2({
         template: 'blue',
         title: '执行摘要',
         tags: [{ text: `${seg.tools.length} 步`, color: 'blue' }],
         elements,
-    });
+    }));
 }
 
 // ─── 模式 1：正常模式（PostToolUse hook 调用）────────────────────────────────
