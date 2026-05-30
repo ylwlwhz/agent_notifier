@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { reconstructSegments, formatToolInput, KEY_TOOLS } = require('../../src/apps/claude-live');
+const { reconstructSegments, formatToolInput, clipLines, buildSegmentCard, KEY_TOOLS } = require('../../src/apps/claude-live');
 
 /** 把若干 transcript 行写到临时 jsonl，返回路径 */
 function writeTranscript(lines) {
@@ -23,6 +23,35 @@ test('WebSearch / WebFetch 已纳入触发并展示的工具集', () => {
 test('formatToolInput：web 工具取 query / url', () => {
   assert.equal(formatToolInput('WebSearch', { query: 'cats' }), 'cats');
   assert.equal(formatToolInput('WebFetch', { url: 'https://x.com' }), 'https://x.com');
+});
+
+test('buildSegmentCard：每个工具渲染成折叠面板（非表格），多行命令/结果走代码块', () => {
+  const seg = { text: '', tools: [
+    { tool: 'Bash', icon: '⚡', input: 'git add -A\ngit push', result: 'pushed\n2 files' },
+    { tool: 'Write', icon: '📝', input: '写入 a.js', result: 'File created' },
+  ] };
+  const card = buildSegmentCard(seg, 'proj', { tools: true, output: true, results: true }, 'tmux:x');
+
+  const panels = card.body.elements.filter(el => el.tag === 'collapsible_panel');
+  assert.equal(panels.length, 2);            // 两个工具 → 两张折叠面板，且无 table
+  assert.ok(!card.body.elements.some(el => el.tag === 'table'), '不应再有 table');
+
+  // 折叠态标题带图标+工具+命令首行；多行命令在展开区走代码块
+  assert.match(panels[0].header.title.content, /⚡ Bash/);
+  assert.match(panels[0].header.title.content, /git add -A/);
+  assert.ok(panels[0].elements.some(e => e.content.includes('```bash')), '多行 Bash 命令应有代码块');
+  assert.ok(panels[0].elements.some(e => e.content.includes('pushed')), '结果应在展开区');
+
+  // 单行命令（Write）标题已含路径，展开区只放结果代码块（不重复命令）
+  assert.ok(!panels[1].elements.some(e => e.content.includes('```bash')));
+  assert.match(panels[1].header.title.content, /📝 Write.*a\.js/);
+});
+
+test('clipLines：保留前 n 行（多行不再只剩第一行），超出补省略号、去尾部空白', () => {
+  assert.equal(clipLines('a\nb\nc', 5), 'a\nb\nc');   // 未超 → 原样保留多行
+  assert.equal(clipLines('a\nb\nc\nd', 2), 'a\nb\n…'); // 超出 → 截断 + 省略号
+  assert.equal(clipLines('only', 5), 'only');
+  assert.equal(clipLines('a\nb\n\n', 5), 'a\nb');      // 去尾部空行
 });
 
 test('reconstructSegments：连续文字合并入同段、web 工具入表、结果回填', () => {

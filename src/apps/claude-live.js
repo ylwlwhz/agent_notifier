@@ -8,7 +8,7 @@
  *   FEISHU_LIVE_CAPTURE=tools,output,results  精细控制
  *     tools   — 工具名 + 关键参数（命令、文件路径）
  *     output  — Claude 上一段助手文字
- *     results — 工具执行结果（前 5 行）
+ *     results — 工具执行结果（折叠面板内展开查看，过长截断）
  *   FEISHU_LIVE_DEBOUNCE_MS=3000   debounce 延迟（毫秒，默认 3000）
  *
  * 触发并展示的工具（关键节点；Read/Grep 等纯本地只读不触发，避免刷屏）:
@@ -139,8 +139,6 @@ function formatToolResult(toolResponse) {
 
 // ─── 执行摘要卡构建 ───────────────────────────────────────────────────────────
 
-const TOOL_COLOR = { Bash: 'blue', Edit: 'green', Write: 'orange', Read: 'grey', NotebookEdit: 'purple', WebSearch: 'violet', WebFetch: 'turquoise' };
-
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h; }
 
 /** 从 transcript 重建当前 turn（到上一条 user prompt 为止）的「文字段 → 其后工具」结构。
@@ -184,29 +182,49 @@ function reconstructSegments(transcriptPath) {
     return { turnTs, segments };
 }
 
+const MAX_CMD_LINES = 15, MAX_RES_LINES = 15;
+/** 取前 n 行，超出补省略号、去尾部空白 */
+function clipLines(text, n) {
+    const lines = String(text).split('\n');
+    const head = lines.slice(0, n).join('\n').trimEnd();
+    return lines.length > n ? `${head}\n…` : head;
+}
+/** 截到 n 字符（面板标题用，单行） */
+function clipChars(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+/** markdown 代码块元素（面板内可正常渲染，表格单元不能） */
+const codeBlock = (text, lang = '') => ({ tag: 'markdown', content: '```' + lang + '\n' + text + '\n```' });
+
+/** 一个工具 → 一张折叠面板：折叠时一行（图标+工具+命令首行），展开看完整命令+输出代码块 */
+function toolPanel(e, capture) {
+    const first = capture.tools && e.input
+        ? clipChars(e.input.split('\n')[0].replace(/^(写入|编辑) /, ''), 56).replace(/`/g, "'")
+        : '';
+    const title = `**${e.icon} ${e.tool}**${first ? `　\`${first}\`` : ''}`;
+
+    const body = [];
+    if (capture.tools && e.input && e.input.includes('\n')) { // 单行命令已在标题，多行才补完整代码块
+        body.push(codeBlock(clipLines(e.input, MAX_CMD_LINES), e.tool === 'Bash' ? 'bash' : ''));
+    }
+    if (capture.results && e.result) body.push(codeBlock(clipLines(e.result.trim(), MAX_RES_LINES)));
+    if (!body.length) body.push({ tag: 'markdown', content: "<font color='grey'>（无输出）</font>" });
+
+    return {
+        tag: 'collapsible_panel', expanded: false,
+        header: { title: { tag: 'markdown', content: title }, icon_position: 'right', icon_expanded_angle: -180 },
+        border: { color: 'grey', corner_radius: '6px' }, padding: '6px 10px',
+        elements: body,
+    };
+}
+
 /** 单个「文字段 + 其工具」渲染成一张执行摘要卡 */
 function buildSegmentCard(seg, projectName, capture, ptsDevice) {
-    const rows = seg.tools.map(e => {
-        let cmd = '';
-        if (capture.tools && e.input) cmd = e.tool === 'Bash' ? '`' + e.input.split('\n')[0] + '`' : e.input.replace(/^(写入|编辑) /, '');
-        const res = capture.results && e.result ? e.result.split('\n')[0].trim() : '';
-        return { tool: [{ text: `${e.icon} ${e.tool}`, color: TOOL_COLOR[e.tool] || 'cyan' }], cmd: cmd || '—', res: res || '—' };
-    });
     const elements = [];
     if (capture.output && seg.text) {
         elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: `❯ ${termLabel(ptsDevice) || 'Claude'}` } }, elements: [{ tag: 'markdown', content: seg.text }] });
         elements.push({ tag: 'hr' });
     }
-    elements.push({
-        tag: 'table', element_id: 'exec_steps', page_size: 10, row_height: 'low', row_max_height: '300px',
-        header_style: { text_align: 'left', background_style: 'grey', bold: true },
-        columns: [
-            { name: 'tool', display_name: '工具',       data_type: 'options', width: '100px', vertical_align: 'top' },
-            { name: 'cmd',  display_name: '命令 / 文件', data_type: 'lark_md', width: '60%',   vertical_align: 'top' },
-            { name: 'res',  display_name: '结果',       data_type: 'text',    width: 'auto',  vertical_align: 'top' },
-        ],
-        rows,
-    });
+    for (const e of seg.tools) elements.push(toolPanel(e, capture));
     return card2({
         template: 'blue',
         title: '执行摘要',
@@ -350,4 +368,4 @@ async function flushBuffer(bufferPath) {
     sessionState.save();
 }
 
-module.exports = { run, reconstructSegments, formatToolInput, parseCaptureConfig, KEY_TOOLS };
+module.exports = { run, reconstructSegments, formatToolInput, parseCaptureConfig, clipLines, buildSegmentCard, KEY_TOOLS };
