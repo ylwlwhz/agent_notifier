@@ -267,7 +267,7 @@ function describeLatestTool(transcriptPath, fallback) {
             return `⌘ **Bash**\n\`\`\`\n${input.command}\n\`\`\`` + (input.description ? `\n${input.description}` : '');
         }
         if (input.file_path) {
-            return `${({ Read: '📖', Edit: '✏️', Write: '📝' })[tool.name] || '🔧'} **${tool.name}**: \`${input.file_path}\``;
+            return `${({ Read: '📖', Edit: '📝', Write: '📝' })[tool.name] || '🔧'} **${tool.name}**: \`${input.file_path}\``;
         }
         return `🔧 **${tool.name}**`;
     }) ?? fallback;

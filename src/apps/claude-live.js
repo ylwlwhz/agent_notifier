@@ -24,7 +24,7 @@ const { KEY_TOOLS } = require('../lib/key-tools');
 const TOOL_ICONS = {
     'Bash': '⌘',
     'Write': '📝',
-    'Edit': '✏️',
+    'Edit': '📝',
     'NotebookEdit': '📓',
     'WebSearch': '🔍',
     'WebFetch': '🌐',

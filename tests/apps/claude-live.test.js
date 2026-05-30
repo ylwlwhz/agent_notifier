@@ -40,7 +40,7 @@ test('formatToolInput：子代理/技能/待办等取可读单行，不裸 JSON'
 test('buildSegmentCard：每个工具一张折叠面板（非表格）；Bash 展示命令+输出，Edit 展示 diff', () => {
   const seg = { text: '', tools: [
     { tool: 'Bash', icon: '⌘', input: 'git add -A\ngit push', raw: { command: 'git add -A\ngit push' }, result: 'pushed\n2 files' },
-    { tool: 'Edit', icon: '✏️', input: '编辑 a.js', raw: { file_path: 'a.js', old_string: 'foo', new_string: 'bar' }, result: 'The file a.js has been updated successfully.' },
+    { tool: 'Edit', icon: '📝', input: '编辑 a.js', raw: { file_path: 'a.js', old_string: 'foo', new_string: 'bar' }, result: 'The file a.js has been updated successfully.' },
   ] };
   const card = buildSegmentCard(seg, 'proj', { tools: true, output: true, results: true }, 'tmux:x');
 
@@ -55,7 +55,7 @@ test('buildSegmentCard：每个工具一张折叠面板（非表格）；Bash �
 
   // Edit：展开区是 old→new diff（看到真实改动），不展示 "updated successfully" 套话结果
   const editBody = panels[1].elements.map(e => e.content).join('\n');
-  assert.match(panels[1].header.title.content, /✏️ Edit.*a\.js/);
+  assert.match(panels[1].header.title.content, /📝 Edit.*a\.js/);
   assert.match(editBody, /```diff[\s\S]*- foo[\s\S]*\+ bar/);
   assert.ok(!editBody.includes('updated successfully'), '写改类的套话结果应隐藏');
 });
