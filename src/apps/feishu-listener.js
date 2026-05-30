@@ -17,7 +17,9 @@ const { createFeishuClient } = require('../channels/feishu/feishu-client');
 const { createFeishuInteractionHandler } = require('../channels/feishu/feishu-interaction-handler');
 const { createCodexInputBridge } = require('../adapters/codex/cli-input-bridge');
 const { card2, inputEl, escFooterRow } = require('../lib/card');
-const { buildReplayPlan, firstUnanswered } = require('../lib/askq-replay');
+const { firstUnanswered } = require('../lib/askq-replay');
+const { spawn } = require('child_process');
+const path = require('path');
 const launcher = require('./launcher');
 const { buildCompletionCard } = require('../lib/completion-card');
 
@@ -401,30 +403,15 @@ class FeishuListener {
         return '已提交';
     }
 
-    /** 后台异步回放：飞书回调须秒级返回，而回放慢，故 fire-and-forget（成败仅记日志，不阻塞 handler）*/
+    /** 回放交给 detached 子进程跑（根因详见 replay-worker.js）：主进程派出后立即空闲，
+     *  card.action.trigger 的 toast 响应帧得以瞬间发回飞书，不被随后几秒注入挤过 3s 窗口而误报超时。 */
     replayInBackground(device, questions, fv) {
-        this.replayQuestions(device, questions, fv)
-            .then(() => this.state.setLastInteractedDevice(device))
-            .catch(err => console.error('[feishu-listener] 回放失败:', err.message));
-    }
-
-    /** 执行 askq-replay 规划出的键序（起点固定在 tab0/选项0，远程时用户不会碰终端）。
-     *  keys=原始字节；text+submit=打字并回车（单选自定义）；multiCustom=文本+空格哨兵（多选自定义：
-     *  该输入框 commit 滞后一个 keypress，哨兵把真实最后一字 commit 进 state，自身 pending、不进答案）。 */
-    async replayQuestions(device, questions, fv) {
-        for (const s of buildReplayPlan(questions, fv)) {
-            if (s.keys != null) {
-                await injectKeys(device, s.keys);
-            } else if (s.multiCustom != null) {
-                await injectKeys(device, s.multiCustom); // 文本
-                await this.sleep(300);
-                await injectKeys(device, ' ');           // 空格哨兵：须单独注入，作为独立 keypress 才能 commit 真实最后一字
-                await this.sleep(400);
-            } else if (s.text != null) {
-                await (s.submit ? injectText : injectKeys)(device, s.text);
-            }
-            await this.sleep(s.pause || 240);
-        }
+        this.state.setLastInteractedDevice(device);
+        const child = spawn(process.execPath, [path.join(__dirname, 'replay-worker.js')], {
+            env: { ...process.env, RW_DEVICE: device, RW_PAYLOAD: JSON.stringify({ questions, fv }) },
+            detached: true, stdio: 'ignore',
+        });
+        child.unref();
     }
 
     checkHealth() {
@@ -460,10 +447,6 @@ class FeishuListener {
         if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
         if (this.cleanupInterval) clearInterval(this.cleanupInterval);
         console.log('[feishu-listener] 监听器已停止');
-    }
-
-    sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
     }
 }
 

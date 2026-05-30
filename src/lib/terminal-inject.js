@@ -17,7 +17,7 @@
  */
 
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execSync, spawn } = require('child_process');
 const { createTerminalInjector } = require('../core/terminal-injector');
 const { createTerminalRouter } = require('../core/terminal-router');
 
@@ -253,30 +253,36 @@ function injectViaFifo(fifoPath, keys) {
     }
 }
 
-/**
- * 通过 tmux send-keys 注入
- */
-function injectViaTmux(target, keys) {
-    // 逐字符处理特殊键
-    const parts = [];
-    for (const ch of keys) {
-        if (ch === '\n' || ch === '\r') parts.push('Enter');
-        else if (ch === '\x1b') parts.push('Escape');
-        else if (ch === '\t') parts.push('Tab');
-        else if (ch === '\x7f' || ch === '\b') parts.push('BSpace');
-        else if (ch === '\x15') parts.push('C-u');
-        else parts.push(shellQuote(ch));
-    }
+/** spawn 一次 `tmux send-keys`：不经 shell、stdio:'ignore' 不建管道、不占 libuv 线程池，比 exec 轻。 */
+function tmuxSendKeys(target, args) {
+    return new Promise((resolve, reject) => {
+        const p = spawn('tmux', ['send-keys', '-t', target, ...args], { stdio: 'ignore' });
+        const timer = setTimeout(() => { try { p.kill(); } catch {} reject(new Error('tmux send-keys timeout')); }, 5000);
+        p.once('error', err => { clearTimeout(timer); reject(err); });
+        p.once('close', code => { clearTimeout(timer); code === 0 ? resolve() : reject(new Error(`tmux exit ${code}`)); });
+    });
+}
 
-    const q = shellQuote(target);
+/** 通过 tmux send-keys 注入。spawn 直接传 argv，无需 shell quote。 */
+async function injectViaTmux(target, keys) {
+    // 逐字符：特殊键转 key 名，其余原样作为字面 key
+    const args = [];
+    for (const ch of keys) {
+        if (ch === '\n' || ch === '\r') args.push('Enter');
+        else if (ch === '\x1b') args.push('Escape');
+        else if (ch === '\t') args.push('Tab');
+        else if (ch === '\x7f' || ch === '\b') args.push('BSpace');
+        else if (ch === '\x15') args.push('C-u');
+        else args.push(ch);
+    }
     try {
         // 末尾 Enter 拆开 + 隔 60ms 单独发：否则长文本+Enter 整块涌入被 Claude TUI 当粘贴、Enter 变换行不提交
-        const submit = parts.length > 1 && parts[parts.length - 1] === 'Enter';
-        if (submit) parts.pop();
-        if (parts.length) execSync(`tmux send-keys -t ${q} ${parts.join(' ')}`, { timeout: 5000, stdio: 'pipe' });
+        const submit = args.length > 1 && args[args.length - 1] === 'Enter';
+        if (submit) args.pop();
+        if (args.length) await tmuxSendKeys(target, args);
         if (submit) {
-            execSync('sleep 0.06');
-            execSync(`tmux send-keys -t ${q} Enter`, { timeout: 5000, stdio: 'pipe' });
+            await new Promise(r => setTimeout(r, 60));
+            await tmuxSendKeys(target, ['Enter']);
         }
         return true;
     } catch (err) {
