@@ -34,5 +34,11 @@ process.stdin.on('end', () => {
             }));
             fs.renameSync(tmp, file);
         }
+        // 官方 5h 限额重置 → 给收尾脚本 statusline-fix.js（同管道两 node 共享父 shell，ppid 相同可关联、不串台）
+        const rl = j.rate_limits?.five_hour;
+        if (rl && typeof rl.resets_at === 'number') {
+            fs.writeFileSync(`/tmp/claude-sl-${process.ppid}.json`,
+                JSON.stringify({ resetsAt: rl.resets_at, pct: rl.used_percentage }));
+        }
     } catch {}
 });
