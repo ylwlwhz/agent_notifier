@@ -1,6 +1,6 @@
 /**
  * Claude Code PostToolUse Hook — 实时执行通知（debounce 聚合版）
- * 在关键工具调用后，将 entry 写入缓冲文件，3 秒无新调用后统一发一张聚合卡片。
+ * 在关键工具调用后将 entry 写入缓冲文件，短防抖（默认 700ms）无新调用后统一发一张聚合卡片。
  *
  * 配置（.env）:
  *   FEISHU_LIVE_CAPTURE=1          开启，默认捕获全部三项
@@ -9,7 +9,7 @@
  *     tools   — 工具名 + 关键参数（命令、文件路径）
  *     output  — Claude 上一段助手文字
  *     results — 工具执行结果（折叠面板内展开查看，过长截断）
- *   FEISHU_LIVE_DEBOUNCE_MS=3000   debounce 延迟（毫秒，默认 3000）
+ *   FEISHU_LIVE_DEBOUNCE_MS=700    debounce 延迟（毫秒，默认 700）
  *
  * 触发并展示的工具集（含哪些、为何排除某些）见 lib/key-tools.js。
  */
@@ -310,7 +310,9 @@ async function main() {
 async function flushBuffer(bufferPath) {
     if (!bufferPath) return;
 
-    const debounceMs = parseInt(process.env.FEISHU_LIVE_DEBOUNCE_MS || '3000', 10);
+    // 防抖只需盖过一次建卡的网络耗时（~250ms），让并发 flush 中的后者醒来时前者已存好 message_id、
+    // 从而走 patch 而非重复 create；合并连续触发由下方 mtime-defer + 文件 unlink 负责，不靠拉长防抖。
+    const debounceMs = parseInt(process.env.FEISHU_LIVE_DEBOUNCE_MS || '700', 10);
 
     await new Promise((resolve) => setTimeout(resolve, debounceMs));
 

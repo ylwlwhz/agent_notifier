@@ -303,7 +303,8 @@ Handled automatically by `install.sh`. For manual setup, add to `~/.claude/setti
     "Stop": [{ "hooks": [{ "type": "command", "command": "node /path/to/hook-handler.js" }] }],
     "Notification": [{ "matcher": "permission_prompt|idle_prompt|elicitation_dialog", "hooks": [{ "type": "command", "command": "node /path/to/hook-handler.js" }] }],
     "StopFailure": [{ "hooks": [{ "type": "command", "command": "node /path/to/hook-handler.js" }] }],
-    "PostToolUse": [{ "matcher": "Bash|Write|Edit|NotebookEdit", "hooks": [{ "type": "command", "command": "node /path/to/live-handler.js" }] }]
+    "PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "node /path/to/ask-handler.js" }] }],
+    "PostToolUse": [{ "matcher": "Bash|Write|Edit|NotebookEdit|WebSearch|WebFetch|Agent|Task|Skill|SlashCommand|TodoWrite|ExitPlanMode|KillShell|BashOutput", "hooks": [{ "type": "command", "command": "node /path/to/live-handler.js" }] }]
   }
 }
 ```

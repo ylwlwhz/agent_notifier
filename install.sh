@@ -103,6 +103,8 @@ const installDir = '$INSTALL_DIR';
 const hookCommand = 'node ' + installDir + '/hook-handler.js';
 const liveCommand = 'node ' + installDir + '/live-handler.js';
 const askCommand = 'node ' + installDir + '/ask-handler.js';
+// 执行摘要的工具 matcher 直接由 KEY_TOOLS 派生，避免与代码里的工具集漂移
+const liveMatcher = [...require(installDir + '/src/lib/key-tools').KEY_TOOLS].join('|');
 
 let settings;
 try {
@@ -132,7 +134,7 @@ const hooksConfig = {
     ],
     'PostToolUse': [
         {
-            matcher: 'Bash|Write|Edit|NotebookEdit',
+            matcher: liveMatcher,
             hooks: [{ type: 'command', command: liveCommand }]
         }
     ],
@@ -146,28 +148,16 @@ const hooksConfig = {
 
 let changed = false;
 
+// 逐规则幂等：按 command 判断是否已存在（同一 event 可有多条命令，如 PreToolUse 的 ask + live）
 for (const [event, newRules] of Object.entries(hooksConfig)) {
-    if (!settings.hooks[event]) {
-        settings.hooks[event] = newRules;
+    if (!settings.hooks[event]) settings.hooks[event] = [];
+    for (const rule of newRules) {
+        const cmd = rule.hooks[0].command;
+        const exists = settings.hooks[event].some(r => r.hooks && r.hooks.some(h => h.command === cmd));
+        if (exists) { console.log('  - 跳过 Hook: ' + event + '（已存在）'); continue; }
+        settings.hooks[event].push(rule);
         changed = true;
         console.log('  + 添加 Hook: ' + event);
-        continue;
-    }
-
-    // 检查是否已有相同 command 的 hook
-    const existing = settings.hooks[event];
-    const targetCmd = event === 'PostToolUse' ? liveCommand : event === 'PreToolUse' ? askCommand : hookCommand;
-    const hasHook = existing.some(rule =>
-        rule.hooks && rule.hooks.some(h => h.command === targetCmd)
-    );
-
-    if (!hasHook) {
-        // 追加到已有的 hook 列表
-        settings.hooks[event].push(...newRules);
-        changed = true;
-        console.log('  + 添加 Hook: ' + event);
-    } else {
-        console.log('  - 跳过 Hook: ' + event + '（已存在）');
     }
 }
 
