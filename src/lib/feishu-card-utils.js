@@ -140,7 +140,7 @@ function buildQuestionsForm(questions, stateKey, ptsDevice) {
             options,
         });
         // 每题都给自定义框（"Type something"）：单选 Enter、多选文本+空格哨兵，均已验证可靠提交
-        formEls.push({ tag: 'input', name: `q${i}_other`, placeholder: { tag: 'plain_text', content: '或自定义…（可选）' } });
+        formEls.push({ tag: 'input', name: `q${i}_other`, width: 'fill', placeholder: { tag: 'plain_text', content: '或自定义…（可选）' } });
     });
     formEls.push({
         tag: 'button', text: { tag: 'plain_text', content: '✅ 提交全部' }, type: 'primary',

@@ -34,7 +34,7 @@ function statsTags(stats, tagColor = 'grey') {
 
 /** 输入框（直接放 body.elements） */
 function inputEl(stateKey, placeholder = '输入指令...', name = 'user_input', actionType = 'text_input') {
-    return { tag: 'input', name, placeholder: { tag: 'plain_text', content: placeholder }, value: { action_type: actionType, session_state_key: stateKey } };
+    return { tag: 'input', name, width: 'fill', placeholder: { tag: 'plain_text', content: placeholder }, value: { action_type: actionType, session_state_key: stateKey } };
 }
 
 /** 中断按钮 */
