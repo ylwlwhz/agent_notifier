@@ -189,14 +189,8 @@ class FeishuListener {
             const optMatch = /^opt_(\d+)$/.exec(action_type || '');
             if (action.input_value || optMatch) {
                 const answers = action.input_value ? { q0_other: action.input_value } : { q0: optMatch[1] };
-                this.state.removeNotification(session_state_key); // 回放前先移除，防重复/延迟回调重入并发注入
-                try {
-                    await this.replayQuestions(notification.pts_device, notification._questions, answers);
-                    this.state.setLastInteractedDevice(notification.pts_device);
-                } catch (err) {
-                    console.error('[feishu-listener] 单选回放失败:', err.message);
-                    return '注入失败';
-                }
+                this.state.removeNotification(session_state_key); // 先移除防重发重入，再后台回放
+                this.replayInBackground(notification.pts_device, notification._questions, answers);
                 return action.input_value ? '已发送' : '已选择';
             }
         }
@@ -401,16 +395,18 @@ class FeishuListener {
         const bad = firstUnanswered(fv, qs); // 某题未答则该 tab 无法前进/提交，先拦下
         if (bad >= 0) return `请回答第 ${bad + 1} 题`;
 
-        // 回放前先移除：飞书回调会重复/延迟投递，回放含多次 sleep，若 notification 仍在会被重入并发注入同会话
+        // 回放耗时（多选自定义/多题可达 ~10s），而飞书回调须秒级响应、否则超时重发并打断；
+        // 故先移除（防重发重入），再后台异步回放、立即返回 toast
         this.state.removeNotification(stateKey);
-        try {
-            await this.replayQuestions(notification.pts_device, qs, fv);
-            this.state.setLastInteractedDevice(notification.pts_device);
-        } catch (err) {
-            console.error('[feishu-listener] 问卷回放失败:', err.message);
-            return '注入失败';
-        }
+        this.replayInBackground(notification.pts_device, qs, fv);
         return '已提交';
+    }
+
+    /** 后台异步回放：飞书回调须秒级返回，而回放慢，故 fire-and-forget（成败仅记日志，不阻塞 handler）*/
+    replayInBackground(device, questions, fv) {
+        this.replayQuestions(device, questions, fv)
+            .then(() => this.state.setLastInteractedDevice(device))
+            .catch(err => console.error('[feishu-listener] 回放失败:', err.message));
     }
 
     /** 执行 askq-replay 规划出的键序（起点固定在 tab0/选项0，远程时用户不会碰终端）。
