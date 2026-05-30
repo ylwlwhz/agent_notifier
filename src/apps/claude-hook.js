@@ -264,7 +264,7 @@ function describeLatestTool(transcriptPath, fallback) {
         if (!tool) return undefined;
         const input = tool.input || {};
         if (tool.name === 'Bash' && input.command) {
-            return `⚡ **Bash**\n\`\`\`\n${input.command}\n\`\`\`` + (input.description ? `\n${input.description}` : '');
+            return `⌘ **Bash**\n\`\`\`\n${input.command}\n\`\`\`` + (input.description ? `\n${input.description}` : '');
         }
         if (input.file_path) {
             return `${({ Read: '📖', Edit: '✏️', Write: '📝' })[tool.name] || '🔧'} **${tool.name}**: \`${input.file_path}\``;

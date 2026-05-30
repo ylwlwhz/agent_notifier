@@ -11,8 +11,7 @@
  *     results — 工具执行结果（折叠面板内展开查看，过长截断）
  *   FEISHU_LIVE_DEBOUNCE_MS=3000   debounce 延迟（毫秒，默认 3000）
  *
- * 触发并展示的工具（关键节点；Read/Grep 等纯本地只读不触发，避免刷屏）:
- *   Bash / Write / Edit / NotebookEdit / WebSearch / WebFetch
+ * 触发并展示的工具集（含哪些、为何排除某些）见 lib/key-tools.js。
  */
 
 const fs = require('fs');
@@ -23,12 +22,16 @@ const { resolvePtsDevice } = require('../lib/terminal-inject');
 const { KEY_TOOLS } = require('../lib/key-tools');
 
 const TOOL_ICONS = {
-    'Bash': '⚡',
+    'Bash': '⌘',
     'Write': '📝',
     'Edit': '✏️',
     'NotebookEdit': '📓',
     'WebSearch': '🔍',
     'WebFetch': '🌐',
+    'Agent': '🤖', 'Task': '🤖',
+    'Skill': '🧩', 'SlashCommand': '⌨️',
+    'TodoWrite': '☑️',
+    'ExitPlanMode': '📋', 'KillShell': '🛑', 'BashOutput': '📤',
 };
 
 // ─── 入口分发 ─────────────────────────────────────────────────────────────────
@@ -110,6 +113,24 @@ function formatToolInput(toolName, toolInput) {
             return (toolInput.query || '');
         case 'WebFetch':
             return (toolInput.url || '');
+        case 'Agent':
+        case 'Task':
+            return toolInput.description || toolInput.subagent_type || '';
+        case 'Skill':
+            return [toolInput.skill, toolInput.args].filter(Boolean).join(' ');
+        case 'SlashCommand':
+            return toolInput.command || '';
+        case 'TodoWrite': {
+            const todos = toolInput.todos || [];
+            const cur = todos.find(t => t.status === 'in_progress');
+            return cur ? (cur.activeForm || cur.content || '') : `${todos.length} 项待办`;
+        }
+        case 'ExitPlanMode':
+            return '提交计划';
+        case 'KillShell':
+            return `终止后台 ${toolInput.shell_id || ''}`.trim();
+        case 'BashOutput':
+            return `读后台输出 ${toolInput.bash_id || ''}`.trim();
         default:
             return JSON.stringify(toolInput);
     }
@@ -168,7 +189,7 @@ function reconstructSegments(transcriptPath) {
                     cur.text = cur.text ? `${cur.text}\n\n${b.text.trim()}` : b.text.trim();
                 } else if (b.type === 'tool_use' && KEY_TOOLS.has(b.name)) {
                     if (!cur) { cur = { text: '', tools: [] }; segments.push(cur); }
-                    cur.tools.push({ tool: b.name, icon: TOOL_ICONS[b.name] || '🔧', input: formatToolInput(b.name, b.input), id: b.id });
+                    cur.tools.push({ tool: b.name, icon: TOOL_ICONS[b.name] || '🔧', input: formatToolInput(b.name, b.input), raw: b.input, id: b.id });
                 }
             }
         } else if (d.type === 'user' && Array.isArray(d.message?.content)) {
@@ -195,7 +216,31 @@ function clipChars(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1
 /** markdown 代码块元素（面板内可正常渲染，表格单元不能） */
 const codeBlock = (text, lang = '') => ({ tag: 'markdown', content: '```' + lang + '\n' + text + '\n```' });
 
-/** 一个工具 → 一张折叠面板：折叠时一行（图标+工具+命令首行），展开看完整命令+输出代码块 */
+// 这些工具的「结果」是套话（"updated successfully"…），隐藏，改在正文展示真实改动
+const NOISY_RESULT = new Set(['Edit', 'Write', 'NotebookEdit']);
+
+/** 工具的「输入详情」块：写改类展示真实改动/内容，Bash 展示多行命令，其余无（payload 在结果里） */
+function toolDetail(e) {
+    const r = e.raw || {};
+    switch (e.tool) {
+        case 'Edit': {
+            if (!r.old_string && !r.new_string) return [];
+            const o = clipLines(r.old_string || '', MAX_CMD_LINES).split('\n').map(l => `- ${l}`);
+            const n = clipLines(r.new_string || '', MAX_CMD_LINES).split('\n').map(l => `+ ${l}`);
+            return [codeBlock([...o, ...n].join('\n'), 'diff')];
+        }
+        case 'Write':
+            return r.content ? [codeBlock(clipLines(r.content, MAX_CMD_LINES))] : [];
+        case 'NotebookEdit':
+            return r.new_source ? [codeBlock(clipLines(r.new_source, MAX_CMD_LINES))] : [];
+        case 'Bash':
+            return (r.command || '').includes('\n') ? [codeBlock(clipLines(r.command, MAX_CMD_LINES), 'bash')] : []; // 单行已在标题
+        default:
+            return [];
+    }
+}
+
+/** 一个工具 → 一张折叠面板：折叠时一行（图标+工具+命令首行），展开看改动详情 + 输出 */
 function toolPanel(e, capture) {
     const first = capture.tools && e.input
         ? clipChars(e.input.split('\n')[0].replace(/^(写入|编辑) /, ''), 56).replace(/`/g, "'")
@@ -203,10 +248,8 @@ function toolPanel(e, capture) {
     const title = `**${e.icon} ${e.tool}**${first ? `　\`${first}\`` : ''}`;
 
     const body = [];
-    if (capture.tools && e.input && e.input.includes('\n')) { // 单行命令已在标题，多行才补完整代码块
-        body.push(codeBlock(clipLines(e.input, MAX_CMD_LINES), e.tool === 'Bash' ? 'bash' : ''));
-    }
-    if (capture.results && e.result) body.push(codeBlock(clipLines(e.result.trim(), MAX_RES_LINES)));
+    if (capture.tools) body.push(...toolDetail(e));
+    if (capture.results && e.result && !NOISY_RESULT.has(e.tool)) body.push(codeBlock(clipLines(e.result.trim(), MAX_RES_LINES)));
     if (!body.length) body.push({ tag: 'markdown', content: "<font color='grey'>（无输出）</font>" });
 
     return {

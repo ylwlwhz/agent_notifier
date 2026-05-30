@@ -25,26 +25,39 @@ test('formatToolInput：web 工具取 query / url', () => {
   assert.equal(formatToolInput('WebFetch', { url: 'https://x.com' }), 'https://x.com');
 });
 
-test('buildSegmentCard：每个工具渲染成折叠面板（非表格），多行命令/结果走代码块', () => {
+test('formatToolInput：子代理/技能/待办等取可读单行，不裸 JSON', () => {
+  assert.equal(formatToolInput('Agent', { subagent_type: 'Explore', description: '扫描代码' }), '扫描代码');
+  assert.equal(formatToolInput('Skill', { skill: 'update-config', args: 'add x' }), 'update-config add x');
+  assert.equal(formatToolInput('SlashCommand', { command: '/review' }), '/review');
+  assert.equal(formatToolInput('TodoWrite', { todos: [
+    { content: 'A', status: 'completed' },
+    { content: '改卡', activeForm: '正在改卡', status: 'in_progress' },
+  ] }), '正在改卡');
+  assert.equal(formatToolInput('TodoWrite', { todos: [{ content: 'A', status: 'completed' }] }), '1 项待办');
+  assert.equal(formatToolInput('KillShell', { shell_id: 'bash_3' }), '终止后台 bash_3');
+});
+
+test('buildSegmentCard：每个工具一张折叠面板（非表格）；Bash 展示命令+输出，Edit 展示 diff', () => {
   const seg = { text: '', tools: [
-    { tool: 'Bash', icon: '⚡', input: 'git add -A\ngit push', result: 'pushed\n2 files' },
-    { tool: 'Write', icon: '📝', input: '写入 a.js', result: 'File created' },
+    { tool: 'Bash', icon: '⌘', input: 'git add -A\ngit push', raw: { command: 'git add -A\ngit push' }, result: 'pushed\n2 files' },
+    { tool: 'Edit', icon: '✏️', input: '编辑 a.js', raw: { file_path: 'a.js', old_string: 'foo', new_string: 'bar' }, result: 'The file a.js has been updated successfully.' },
   ] };
   const card = buildSegmentCard(seg, 'proj', { tools: true, output: true, results: true }, 'tmux:x');
 
   const panels = card.body.elements.filter(el => el.tag === 'collapsible_panel');
-  assert.equal(panels.length, 2);            // 两个工具 → 两张折叠面板，且无 table
+  assert.equal(panels.length, 2);
   assert.ok(!card.body.elements.some(el => el.tag === 'table'), '不应再有 table');
 
-  // 折叠态标题带图标+工具+命令首行；多行命令在展开区走代码块
-  assert.match(panels[0].header.title.content, /⚡ Bash/);
-  assert.match(panels[0].header.title.content, /git add -A/);
+  // Bash：多行命令走代码块，结果在展开区
+  assert.match(panels[0].header.title.content, /⌘ Bash/);
   assert.ok(panels[0].elements.some(e => e.content.includes('```bash')), '多行 Bash 命令应有代码块');
   assert.ok(panels[0].elements.some(e => e.content.includes('pushed')), '结果应在展开区');
 
-  // 单行命令（Write）标题已含路径，展开区只放结果代码块（不重复命令）
-  assert.ok(!panels[1].elements.some(e => e.content.includes('```bash')));
-  assert.match(panels[1].header.title.content, /📝 Write.*a\.js/);
+  // Edit：展开区是 old→new diff（看到真实改动），不展示 "updated successfully" 套话结果
+  const editBody = panels[1].elements.map(e => e.content).join('\n');
+  assert.match(panels[1].header.title.content, /✏️ Edit.*a\.js/);
+  assert.match(editBody, /```diff[\s\S]*- foo[\s\S]*\+ bar/);
+  assert.ok(!editBody.includes('updated successfully'), '写改类的套话结果应隐藏');
 });
 
 test('clipLines：保留前 n 行（多行不再只剩第一行），超出补省略号、去尾部空白', () => {

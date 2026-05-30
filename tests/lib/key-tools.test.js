@@ -6,12 +6,13 @@ const assert = require('node:assert/strict');
 const { KEY_TOOLS } = require('../../src/lib/key-tools');
 const live = require('../../src/apps/claude-live');
 
-test('KEY_TOOLS 含有副作用/对外动作的工具，不含纯只读', () => {
-  for (const t of ['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebSearch', 'WebFetch']) {
+test('KEY_TOOLS 含写改/联网/子代理/技能/待办/计划·进程控制，不含高频纯读与问卷卡', () => {
+  for (const t of ['Bash', 'Write', 'Edit', 'NotebookEdit', 'WebSearch', 'WebFetch',
+                   'Agent', 'Task', 'Skill', 'SlashCommand', 'TodoWrite', 'ExitPlanMode', 'KillShell', 'BashOutput']) {
     assert.ok(KEY_TOOLS.has(t), `应含 ${t}`);
   }
-  for (const t of ['Read', 'Grep', 'Glob']) {
-    assert.ok(!KEY_TOOLS.has(t), `不应含 ${t}（纯只读，避免刷屏）`);
+  for (const t of ['Read', 'Grep', 'Glob', 'AskUserQuestion']) {
+    assert.ok(!KEY_TOOLS.has(t), `不应含 ${t}`);
   }
 });
 
