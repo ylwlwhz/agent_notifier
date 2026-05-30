@@ -3,109 +3,50 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const {
-  sendSingleSelectCard,
-  sendMultiQuestionFirstCard,
-} = require('../../src/apps/claude-ask');
+const { sendQuestionsForm } = require('../../src/apps/claude-ask');
+const { sessionState } = require('../../src/lib/session-state');
 
-test('single-select card maps second option to ArrowDown plus Enter', async () => {
-  const sent = [];
-  const app = {
+function fakeApp(sent) {
+  return {
     chatId: 'chat-1',
-    client: {
-      im: {
-        message: {
-          create: async ({ data }) => {
-            sent.push(JSON.parse(data.content));
-            return { data: { message_id: 'msg-1' } };
-          },
-        },
-      },
-    },
+    client: { im: { message: { create: async ({ data }) => { sent.push(JSON.parse(data.content)); return { data: { message_id: 'msg-1' } }; } } } },
   };
+}
 
-  await sendSingleSelectCard(
-    app,
-    {
-      header: '方案选择',
-      question: '请选择方案',
-      multiSelect: false,
-      options: [
-        { label: '选项一', value: 'a' },
-        { label: '选项二', value: 'b' },
-      ],
-    },
-    'state-single',
-    'fifo:/tmp/agent-inject-pts7',
-    'session-1',
-    'AskUserQuestion',
-    'footer'
-  );
-
-  assert.equal(sent.length, 1);
-
-  const card = sent[0];
-  const buttons = card.elements.find(el => el.tag === 'action' && el.actions?.[0]?.tag === 'button');
-  assert.equal(buttons.actions[1].value.action_type, 'opt_1');
-
-  const { sessionState } = require('../../src/lib/session-state');
-  const notification = sessionState.getNotification('state-single');
-  assert.equal(notification.responses.opt_0.keys, '\r');
-  assert.equal(notification.responses.opt_1.keys, '\x1b[B\r');
-  assert.equal(notification.responses.opt_other.keys, '\x1b[B\x1b[B\r');
-
-  sessionState.removeNotification('state-single');
-});
-
-test('multi-question first card maps second option to ArrowDown plus Enter', async () => {
+test('sendQuestionsForm：单题/多题统一发一张 form 卡，并存回放元数据', async () => {
   const sent = [];
-  const app = {
-    chatId: 'chat-1',
-    client: {
-      im: {
-        message: {
-          create: async ({ data }) => {
-            sent.push(JSON.parse(data.content));
-            return { data: { message_id: 'msg-2' } };
-          },
-        },
-      },
-    },
-  };
-
-  await sendMultiQuestionFirstCard(
-    app,
+  await sendQuestionsForm(
+    fakeApp(sent),
     [
-      {
-        header: '问题一',
-        question: '第一题',
-        options: [
-          { label: 'A', value: 'a' },
-          { label: 'B', value: 'b' },
-        ],
-      },
-      {
-        header: '问题二',
-        question: '第二题',
-        options: [
-          { label: 'C', value: 'c' },
-        ],
-      },
+      { header: '方案', question: '选哪个？', multiSelect: false, options: [{ label: 'A' }, { label: 'B' }] },
+      { header: '水果', question: '吃啥？', multiSelect: true, options: [{ label: '苹果' }, { label: '梨' }, { label: '桃' }] },
     ],
-    'state-multi',
-    'fifo:/tmp/agent-inject-pts7',
-    'session-1',
-    'AskUserQuestion',
-    'footer'
+    'state-form', 'fifo:/tmp/agent-inject-pts7', 'session-1', 'AskUserQuestion',
   );
 
   assert.equal(sent.length, 1);
+  const card = sent[0];
 
-  const { sessionState } = require('../../src/lib/session-state');
-  const notification = sessionState.getNotification('state-multi');
-  assert.equal(notification.responses.opt_0.keys, '\r');
-  assert.equal(notification.responses.opt_1.keys, '\x1b[B\r');
-  assert.equal(notification.responses.opt_other.keys, '\x1b[B\x1b[B\r');
+  // 单 form 容器，含两题的选择器 + 提交按钮
+  const form = card.body.elements.find(el => el.tag === 'form');
+  assert.ok(form, '应有 form 容器');
+  const tags = form.elements.map(el => el.tag);
+  assert.ok(tags.includes('select_static'), '单选题用 select_static');
+  assert.ok(tags.includes('multi_select_static'), '多选题用 multi_select_static');
+  const submit = form.elements.find(el => el.tag === 'button');
+  assert.equal(submit.value.action_type, 'submit_questions');
 
-  sessionState.removeNotification('state-multi');
+  // 每题都带自定义输入框（单选/多选自定义均已可靠）
+  const inputs = form.elements.filter(el => el.tag === 'input');
+  assert.equal(inputs.length, 2);
+  assert.deepEqual(inputs.map(i => i.name), ['q0_other', 'q1_other']);
+
+  // 存了回放所需的精简元数据
+  const notif = sessionState.getNotification('state-form');
+  assert.equal(notif._questions_form, true);
+  assert.deepEqual(notif._questions, [
+    { multiSelect: false, optionCount: 2 },
+    { multiSelect: true, optionCount: 3 },
+  ]);
+  sessionState.removeNotification('state-form');
 });

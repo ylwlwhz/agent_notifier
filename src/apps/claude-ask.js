@@ -3,11 +3,8 @@
 /**
  * Claude Code PreToolUse hook handler for AskUserQuestion
  *
- * Receives AskUserQuestion data via stdin and sends interactive Feishu cards
- * so the user can respond from their phone. Supports:
- *   - Single single-select question → orange card with option buttons + text input
- *   - Single multi-select question  → toggle-button card via buildMultiSelectCard
- *   - Multiple questions            → first question card only; listener sends the rest
+ * 通过 stdin 收到 AskUserQuestion，发一张飞书 form 卡让用户手机作答。
+ * 单题/多题、单选/多选统一走 buildQuestionsForm；listener 收 form_value 后回放注入 TUI。
  */
 
 const fs = require('fs');
@@ -16,8 +13,7 @@ const Lark = require('@larksuiteoapi/node-sdk');
 const { envConfig } = require('../lib/env-config');
 const { sessionState } = require('../lib/session-state');
 const { resolvePtsDevice } = require('../lib/terminal-inject');
-const { buildMultiSelectCard, parseMarkdownToElements } = require('../lib/feishu-card-utils');
-const { selectCard } = require('../lib/card');
+const { buildQuestionsForm, buildSingleSelectCard } = require('../lib/feishu-card-utils');
 
 // ── Utility functions ─────────────────────────────────────
 
@@ -109,130 +105,36 @@ async function getFeishuAppClient() {
 
 // ── Card senders ──────────────────────────────────────────
 
-/** Case A: single multi-select question */
-async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType) {
-    const notif = {
-        session_id: sessionId,
-        notification_type: notificationType,
-        pts_device: ptsDevice,
-        created_at: Date.now(),
-        responses: {},
-        _multi_select: true,
-        _selected: [],
-        _ms_options: q.options.map(o => o.label),
-        _ms_total: q.options.length,
-        _question: q.question || '',
-        _context_text: q._contextText || '',
-        _message_id: null,
-    };
+// 回放元数据只需每题的「单/多选 + 选项数」；esc/interrupt 中断键所有卡通用
+const replayMeta = q => ({ multiSelect: !!q.multiSelect, optionCount: q.options.length });
 
-    const card = buildMultiSelectCard(notif, stateKey);
-
-    try {
-        const resp = await app.client.im.message.create({
-            params: { receive_id_type: 'chat_id' },
-            data: {
-                receive_id: app.chatId,
-                msg_type: 'interactive',
-                content: JSON.stringify(card),
-            },
-        });
-        notif._message_id = resp?.data?.message_id || null;
-        sessionState.addNotification(stateKey, notif);
-    } catch (err) {
-        console.error('[ask-handler] 发送多选卡片失败:', err.message);
-    }
-}
-
-/** Case B: single single-select question */
-async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType) {
-    const card = selectCard({
-        title: q.header || '方案选择',
-        contextText: q._contextText || '',
-        question: q.question || '',
-        options: q.options.map(o => o.label),
-        stateKey, ptsDevice,
-        mdToEls: parseMarkdownToElements,
-    });
-
-    // Build responses map — Claude Code TUI 使用箭头键导航，不接受数字选择
-    // opt_0 (第一个，默认高亮): 直接 Enter
-    // opt_N: N 次 ↓ 再 Enter
-    const ARROW_DOWN = '\x1b[B';
-    const responses = {};
-    q.options.forEach((opt, idx) => {
-        responses[`opt_${idx}`] = { keys: ARROW_DOWN.repeat(idx) + '\r', label: opt.label };
-    });
-    // 自定义答案：移到 Type something（不按 Enter，否则是空提交取消），文本由 injectText 打字+提交
-    const otherIdx = q.options.length;
-    responses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx), label: '_meta' };
-    responses['esc'] = { keys: '\x1b', label: 'Esc' };
-    responses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
-
-    try {
-        await app.client.im.message.create({
-            params: { receive_id_type: 'chat_id' },
-            data: {
-                receive_id: app.chatId,
-                msg_type: 'interactive',
-                content: JSON.stringify(card),
-            },
-        });
-        sessionState.addNotification(stateKey, {
-            session_id: sessionId,
-            notification_type: notificationType,
-            pts_device: ptsDevice,
-            created_at: Date.now(),
-            responses,
-        });
-    } catch (err) {
-        console.error('[ask-handler] 发送单选卡片失败:', err.message);
-    }
-}
-
-/** Case C: multiple questions — send first, store all for listener */
-async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType) {
-    const q = questions[0];
-    const contextText = q._contextText || '';
-    const ARROW_DOWN = '\x1b[B';
-    const otherIdx = q.options.length;
-
-    const qResponses = {};
-    q.options.forEach((opt, optIdx) => {
-        qResponses[`opt_${optIdx}`] = { keys: ARROW_DOWN.repeat(optIdx) + '\r', label: opt.label };
-    });
-    qResponses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx), label: '_meta' };
-    qResponses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
-
-    // Store all questions for listener
+/** 发卡 + 登记回放 state；meta 区分卡型（_single_select / _questions_form）*/
+async function sendCard(app, card, stateKey, ptsDevice, sessionId, notificationType, meta) {
     sessionState.addNotification(stateKey, {
-        session_id: sessionId,
-        notification_type: notificationType,
-        pts_device: ptsDevice,
-        created_at: Date.now(),
-        responses: qResponses,
-        _all_questions: questions,
-        _current_q: 0,
-        _chat_id: app.chatId,
+        session_id: sessionId, notification_type: notificationType, pts_device: ptsDevice, created_at: Date.now(),
+        responses: { esc: { keys: '\x1b', label: 'Esc' }, interrupt: { keys: '\x1b', label: '⛔ 中断' } },
+        ...meta,
     });
-
-    const qCard = selectCard({
-        title: `${q.header || '选择'} (1/${questions.length})`,
-        contextText,
-        question: q.question || '',
-        options: q.options.map(o => o.label),
-        stateKey, ptsDevice,
-        mdToEls: parseMarkdownToElements,
-    });
-
     try {
         await app.client.im.message.create({
             params: { receive_id_type: 'chat_id' },
-            data: { receive_id: app.chatId, msg_type: 'interactive', content: JSON.stringify(qCard) },
+            data: { receive_id: app.chatId, msg_type: 'interactive', content: JSON.stringify(card) },
         });
     } catch (err) {
-        console.error('[ask-handler] 发送 Q1 卡片失败:', err.message);
+        console.error('[ask-handler] 发送卡片失败:', err.message);
     }
+}
+
+/** 单题单选 → 按钮卡（点一下即答）；回放共用 buildReplayPlan：listener 按 opt_i / 自定义输入调 replayQuestions */
+function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType) {
+    return sendCard(app, buildSingleSelectCard(q, stateKey, ptsDevice), stateKey, ptsDevice, sessionId, notificationType,
+        { _single_select: true, _questions: [replayMeta(q)] });
+}
+
+/** 多题 / 单题多选 → 单 form 卡：一次收齐答案，listener 收 form_value 后回放注入 TUI */
+function sendQuestionsForm(app, questions, stateKey, ptsDevice, sessionId, notificationType) {
+    return sendCard(app, buildQuestionsForm(questions, stateKey, ptsDevice), stateKey, ptsDevice, sessionId, notificationType,
+        { _questions_form: true, _questions: questions.map(replayMeta) });
 }
 
 // ── Main ─────────────────────────────────────────────────
@@ -278,18 +180,11 @@ async function main() {
     // Attach contextText to question objects for use in card builders
     questions.forEach(q => { q._contextText = contextText; });
 
-    if (questions.length > 1) {
-        // Case C: multiple questions
-        await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType);
+    // 单题单选 → 按钮卡（一点即答）；其余（多题 / 单题多选）→ form 卡。两者回放共用 buildReplayPlan
+    if (questions.length === 1 && !questions[0].multiSelect) {
+        await sendSingleSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, notificationType);
     } else {
-        const q = questions[0];
-        if (q.multiSelect) {
-            // Case A: single multi-select
-            await sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType);
-        } else {
-            // Case B: single single-select
-            await sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType);
-        }
+        await sendQuestionsForm(app, questions, stateKey, ptsDevice, sessionId, notificationType);
     }
 }
 
@@ -302,7 +197,6 @@ module.exports = {
     getProjectName,
     getTimestamp,
     sendSingleSelectCard,
-    sendMultiSelectCard,
-    sendMultiQuestionFirstCard,
+    sendQuestionsForm,
     main,
 };

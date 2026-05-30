@@ -16,8 +16,8 @@ const { injectKeys, injectText } = require('../lib/terminal-inject');
 const { createFeishuClient } = require('../channels/feishu/feishu-client');
 const { createFeishuInteractionHandler } = require('../channels/feishu/feishu-interaction-handler');
 const { createCodexInputBridge } = require('../adapters/codex/cli-input-bridge');
-const { selectCard, card2, inputEl, escFooterRow } = require('../lib/card');
-const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
+const { card2, inputEl, escFooterRow } = require('../lib/card');
+const { buildReplayPlan, firstUnanswered } = require('../lib/askq-replay');
 const launcher = require('./launcher');
 const { buildCompletionCard } = require('../lib/completion-card');
 
@@ -184,66 +184,29 @@ class FeishuListener {
             }
         }
 
-        // ── 原生多选 form 提交（必须在通用 input 处理之前） ──
-        if (action_type === 'submit_multi') {
-            const fv = action.form_value || {};
-            const total = notification._ms_total || (notification._ms_options || []).length;
-            // form_value.sel = 勾选的选项索引数组；form_value.other = Other 自定义文本
-            const selectedSet = new Set((fv.sel || []).map(Number).filter(n => n >= 0 && n < total));
-            const otherText = (fv.other || '').trim() || null;
-            if (otherText) selectedSet.add(total); // Other 槽 = total（0-indexed）
-            const hasOther = selectedSet.has(total);
-
-            if (selectedSet.size === 0) return '请至少勾选一项';
-
-            console.log(`[feishu-listener] submit_multi → selected:`, [...selectedSet], 'total:', total, 'hasOther:', hasOther, 'otherText:', otherText);
-
-            try {
-                // 终端结构：选项0..N-1 + Other + Submit（共 N+2 项）
-                const totalItems = total + 1; // 选项 + Other
-                const injected = []; // 调试日志
-                for (let i = 0; i < totalItems; i++) {
-                    if (i === total && hasOther) {
-                        // Other 特殊处理：Space 打开内联输入 → 输入文本 → Enter 关闭
-                        await injectKeys(notification.pts_device, '\x20'); // Space 打开 Other 输入
-                        injected.push(`Space@${i}(Other)`);
-                        await this.sleep(300);
-                        if (otherText) {
-                            await injectKeys(notification.pts_device, otherText); // 只发文本，不发 Enter
-                            injected.push(`Text("${otherText}")`);
-                            await this.sleep(300);
-                        }
-                    } else if (selectedSet.has(i)) {
-                        await injectKeys(notification.pts_device, '\x20'); // Space 勾选
-                        injected.push(`Space@${i}`);
-                        await this.sleep(300);
-                    }
-                    await injectKeys(notification.pts_device, '\x1b[B'); // ↓ 下一项
-                    injected.push(`Down`);
-                    await this.sleep(300);
+        // ── 单题单选按钮卡：点 opt_i 选项 / 输入自定义，统一走 buildReplayPlan（中断按钮落到下方通用注入）──
+        if (notification._single_select) {
+            const optMatch = /^opt_(\d+)$/.exec(action_type || '');
+            if (action.input_value || optMatch) {
+                const answers = action.input_value ? { q0_other: action.input_value } : { q0: optMatch[1] };
+                this.state.removeNotification(session_state_key); // 回放前先移除，防重复/延迟回调重入并发注入
+                try {
+                    await this.replayQuestions(notification.pts_device, notification._questions, answers);
+                    this.state.setLastInteractedDevice(notification.pts_device);
+                } catch (err) {
+                    console.error('[feishu-listener] 单选回放失败:', err.message);
+                    return '注入失败';
                 }
-                // cursor 现在在 Submit 上
-                injected.push('Enter');
-                await injectKeys(notification.pts_device, '\r'); // Enter 提交 checkbox
-                console.log(`[feishu-listener] 注入序列:`, injected.join(' → '), '| device:', notification.pts_device);
-
-                // 等待确认对话框 "Submit answers / Cancel"，按 1 确认
-                await this.sleep(500);
-                await injectKeys(notification.pts_device, '1'); // 选择 "Submit answers"
-                this.state.setLastInteractedDevice(notification.pts_device);
-            } catch (err) {
-                console.error('[feishu-listener] 多选注入失败:', err.message);
-                return '注入失败';
+                return action.input_value ? '已发送' : '已选择';
             }
-
-            const opts = notification._ms_options || [];
-            const labels = [...selectedSet].sort((a, b) => a - b)
-                .map(i => i < total ? (opts[i] || `选项${i + 1}`) : `Other: ${otherText || ''}`);
-            this.state.removeNotification(session_state_key);
-            return `已提交: ${labels.join(', ')}`;
         }
 
-        // ── Input: 用户在卡片输入框中输入了文字 ──
+        // ── 多问题 form 提交：一次收齐所有答案，按题序回放注入 TUI 问卷 ──
+        if (action_type === 'submit_questions') {
+            return this.handleQuestionsForm(notification, action, session_state_key);
+        }
+
+        // ── Input: 卡片输入框提交（启动/接回会话发指令、权限单键） ──
         if (action.tag === 'input' && action.input_value) {
             try {
                 if (notification.notification_type === 'permission_prompt') {
@@ -251,12 +214,6 @@ class FeishuListener {
                     await injectKeys(notification.pts_device, action.input_value.trim());
                     console.log(`[feishu-listener] 已注入按键到 ${notification.pts_device}: ${action.input_value.trim()}`);
                 } else {
-                    // 自定义答案：用 _other_num 把光标移到「Type something」，再注入文本（= 走 Other）
-                    const otherMeta = notification.responses?.['_other_num'];
-                    if (otherMeta) {
-                        await injectKeys(notification.pts_device, otherMeta.keys);
-                        await this.sleep(500);
-                    }
                     await injectText(notification.pts_device, action.input_value);
                     console.log(`[feishu-listener] 已注入文字到 ${notification.pts_device}: ${action.input_value.substring(0, 50)}`);
                 }
@@ -264,12 +221,6 @@ class FeishuListener {
             } catch (err) {
                 console.error('[feishu-listener] 文字注入失败:', err.message);
                 return;
-            }
-            // 多问题模式：删除并发送下一题；普通卡片：保留以支持多次回复
-            if (notification._all_questions) {
-                this.state.removeNotification(session_state_key);
-                this.sendNextQuestion(notification, session_state_key).catch(err =>
-                    console.error('[feishu-listener] 发送下一题失败:', err.message));
             }
             return '已发送';
         }
@@ -304,12 +255,6 @@ class FeishuListener {
             return '已开启全局允许，后续权限自动批准';
         }
 
-        // 多问题模式按钮：删除并发下一题；普通卡片按钮（esc/allow 等）：保留以支持多次操作
-        if (notification._all_questions) {
-            this.state.removeNotification(session_state_key);
-            this.sendNextQuestion(notification, session_state_key).catch(err =>
-                console.error('[feishu-listener] 发送下一题失败:', err.message));
-        }
         return responseEntry.label;
     }
 
@@ -448,82 +393,42 @@ class FeishuListener {
         } catch (err) { console.error('[feishu-listener] 发送失败:', err.message); }
     }
 
-    /**
-     * 多问题模式：发送下一题卡片，或最后的提交/取消卡片
-     */
-    async sendNextQuestion(notification, prevStateKey) {
-        const questions = notification._all_questions;
-        const nextIdx = (notification._current_q || 0) + 1;
-        const chatId = notification._chat_id;
-        const totalQ = questions.length;
+    /** 表单提交：校验每题已答 → 规划键序 → 回放注入 TUI 问卷 */
+    async handleQuestionsForm(notification, action, stateKey) {
+        const fv = action.form_value || {};
+        const qs = notification._questions || [];
 
-        if (!chatId) return;
+        const bad = firstUnanswered(fv, qs); // 某题未答则该 tab 无法前进/提交，先拦下
+        if (bad >= 0) return `请回答第 ${bad + 1} 题`;
 
-        // 生成新的 stateKey（基于当前 key 替换末尾）
-        const baseKey = prevStateKey.replace(/_q\d+$/, '').replace(/_confirm$/, '');
-        const newStateKey = `${baseKey}_q${nextIdx}`;
+        // 回放前先移除：飞书回调会重复/延迟投递，回放含多次 sleep，若 notification 仍在会被重入并发注入同会话
+        this.state.removeNotification(stateKey);
+        try {
+            await this.replayQuestions(notification.pts_device, qs, fv);
+            this.state.setLastInteractedDevice(notification.pts_device);
+        } catch (err) {
+            console.error('[feishu-listener] 问卷回放失败:', err.message);
+            return '注入失败';
+        }
+        return '已提交';
+    }
 
-        if (nextIdx < totalQ) {
-            // 还有下一题
-            const q = questions[nextIdx];
-            const ARROW_DOWN = '\x1b[B';
-            const otherIdx = q.options.length;
-
-            const qResponses = {};
-            q.options.forEach((opt, optIdx) => {
-                qResponses[`opt_${optIdx}`] = { keys: ARROW_DOWN.repeat(optIdx) + '\r', label: opt.label };
-            });
-            qResponses['_other_num'] = { keys: ARROW_DOWN.repeat(otherIdx), label: '_meta' };
-            qResponses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
-
-            // 保存 state（沿用多问题元数据）
-            this.state.addNotification(newStateKey, {
-                session_id: notification.session_id,
-                notification_type: notification.notification_type,
-                pts_device: notification.pts_device,
-                created_at: Date.now(),
-                responses: qResponses,
-                _all_questions: questions,
-                _current_q: nextIdx,
-                _chat_id: chatId,
-            });
-
-            // 发送卡片（schema 2.0，与 claude-ask 同款 selectCard）
-            const qCard = selectCard({
-                title: `${q.header || '选择'} (${nextIdx + 1}/${totalQ})`,
-                question: q.question || '',
-                options: q.options.map(o => o.label),
-                stateKey: newStateKey, ptsDevice: notification.pts_device,
-                mdToEls: parseMarkdownToElements,
-            });
-
-            try {
-                await this.client.im.message.create({
-                    params: { receive_id_type: 'chat_id' },
-                    data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(qCard) },
-                });
-                console.log(`[feishu-listener] 已发送 Q${nextIdx + 1}/${totalQ} 卡片`);
-            } catch (err) {
-                console.error(`[feishu-listener] 发送 Q${nextIdx + 1} 卡片失败:`, err.message);
+    /** 执行 askq-replay 规划出的键序（起点固定在 tab0/选项0，远程时用户不会碰终端）。
+     *  keys=原始字节；text+submit=打字并回车（单选自定义）；multiCustom=文本+空格哨兵（多选自定义：
+     *  该输入框 commit 滞后一个 keypress，哨兵把真实最后一字 commit 进 state，自身 pending、不进答案）。 */
+    async replayQuestions(device, questions, fv) {
+        for (const s of buildReplayPlan(questions, fv)) {
+            if (s.keys != null) {
+                await injectKeys(device, s.keys);
+            } else if (s.multiCustom != null) {
+                await injectKeys(device, s.multiCustom); // 文本
+                await this.sleep(300);
+                await injectKeys(device, ' ');           // 空格哨兵：须单独注入，作为独立 keypress 才能 commit 真实最后一字
+                await this.sleep(400);
+            } else if (s.text != null) {
+                await (s.submit ? injectText : injectKeys)(device, s.text);
             }
-        } else {
-            // 所有问题已回答 — 所有答案在逐题 Enter 时已注入终端，此处仅发状态通知
-            // 不存 sessionState、不带注入按钮，避免多注入一个 Enter 到错误上下文
-            const doneCard = card2({
-                template: 'green',
-                title: `全部已回答 (${totalQ} 题)`,
-                elements: [{ tag: 'markdown', content: '答案已全部提交' }],
-            });
-
-            try {
-                await this.client.im.message.create({
-                    params: { receive_id_type: 'chat_id' },
-                    data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(doneCard) },
-                });
-                console.log('[feishu-listener] 已发送多问题完成通知');
-            } catch (err) {
-                console.error('[feishu-listener] 发送完成通知失败:', err.message);
-            }
+            await this.sleep(s.pause || 240);
         }
     }
 

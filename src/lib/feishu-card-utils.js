@@ -108,44 +108,65 @@ function buildFeishuTable(lines) {
     };
 }
 
+/** 题干 markdown：**header**　question */
+const questionHeading = q => ({ tag: 'markdown', content: `${q.header ? `**${q.header}**　` : ''}${q.question || ''}` });
+
 /**
- * 构建多选卡片（输入框方案：用户输入选项编号，一次提交）
- * @param {Object} notification - sessionState 里的通知对象，含 _ms_options/_question/_context_text/_note_parts
- * @param {string} stateKey - session_state_key
+ * 多问题卡：一个 form 装下所有问题（单选 select_static / 多选 multi_select_static + 每题一个自定义 input），
+ * 一次提交回调 form_value 全量返回。listener 收到后按题号顺序回放注入到 TUI 的 tab 式问卷。
+ * @param {Array} questions - 每项含 header/question/multiSelect/options[{label}]/_contextText
+ * @param {string} stateKey
+ * @param {string} ptsDevice
  * @returns {Object} 飞书卡片 JSON
  */
-function buildMultiSelectCard(notification, stateKey) {
-    const options = notification._ms_options || [];
-    const question = notification._question || '';
-    const contextText = notification._context_text || '';
+function buildQuestionsForm(questions, stateKey, ptsDevice) {
+    const { card2, escFooterRow } = require('./card');
+    const contextText = questions[0]?._contextText || '';
 
-    const elements = [];
-
-    if (contextText) {
-        elements.push(...parseMarkdownToElements(contextText));
-        elements.push({ tag: 'hr' });
-    }
-    if (question) elements.push({ tag: 'markdown', content: question });
-
-    // 原生多选下拉 + Other 自定义输入 + 提交，form 一次打包（回调 action.form_value.sel / .other）
-    elements.push({
-        tag: 'form', name: 'ms_form',
-        elements: [
-            {
-                tag: 'multi_select_static', name: 'sel',
-                placeholder: { tag: 'plain_text', content: '点击勾选（可多选）' },
-                options: options.map((opt, i) => ({ value: String(i), text: { tag: 'plain_text', content: opt } })),
-            },
-            { tag: 'input', name: 'other', placeholder: { tag: 'plain_text', content: '其他（自定义文本，可选）' } },
-            {
-                tag: 'button', text: { tag: 'plain_text', content: '✅ 提交' }, type: 'primary',
-                action_type: 'form_submit', name: 'submit',
-                value: { action_type: 'submit_multi', session_state_key: stateKey },
-            },
-        ],
+    const formEls = [];
+    questions.forEach((q, i) => {
+        if (i > 0) formEls.push({ tag: 'hr' });
+        formEls.push(questionHeading(q));
+        const options = q.options.map((o, j) => ({ value: String(j), text: { tag: 'plain_text', content: o.label } }));
+        formEls.push({
+            tag: q.multiSelect ? 'multi_select_static' : 'select_static', name: `q${i}`,
+            placeholder: { tag: 'plain_text', content: q.multiSelect ? '勾选（可多选）' : '点击选择' },
+            options,
+        });
+        // 每题都给自定义框（"Type something"）：单选 Enter、多选文本+空格哨兵，均已验证可靠提交
+        formEls.push({ tag: 'input', name: `q${i}_other`, placeholder: { tag: 'plain_text', content: '或自定义…（可选）' } });
+    });
+    formEls.push({
+        tag: 'button', text: { tag: 'plain_text', content: '✅ 提交全部' }, type: 'primary',
+        action_type: 'form_submit', name: 'submit',
+        value: { action_type: 'submit_questions', session_state_key: stateKey },
     });
 
-    return require('./card').card2({ template: 'orange', icon: 'list_outlined', title: '多选', elements });
+    const els = [];
+    if (contextText) { els.push(...parseMarkdownToElements(contextText)); els.push({ tag: 'hr' }); }
+    els.push({ tag: 'form', name: 'q_form', elements: formEls });
+    els.push(escFooterRow(stateKey, ptsDevice)); // 中断 + 右侧终端 id（仿 Stop 卡）
+    return card2({ template: 'orange', icon: 'list_outlined', title: `${questions.length} 个问题`, elements: els });
 }
 
-module.exports = { parseMarkdownToElements, buildFeishuTable, buildMultiSelectCard };
+/**
+ * 单题单选按钮卡：每个选项一个按钮（点一下即答，比下拉省两步）+ 自定义输入框 + 中断·终端id。
+ * 回放仍走共用 buildReplayPlan：点 opt_i → 回放 {q0:i}；输入自定义 → 回放 {q0_other:文本}。
+ * @param {Object} q - 含 header/question/options[{label}]/_contextText
+ */
+function buildSingleSelectCard(q, stateKey, ptsDevice) {
+    const { card2, escFooterRow, inputEl } = require('./card');
+    const els = [];
+    const ctx = q._contextText || '';
+    if (ctx) { els.push(...parseMarkdownToElements(ctx)); els.push({ tag: 'hr' }); }
+    if (q.question) els.push(questionHeading(q));
+    q.options.forEach((o, i) => els.push({
+        tag: 'button', text: { tag: 'plain_text', content: o.label }, type: i === 0 ? 'primary' : 'default',
+        value: { action_type: `opt_${i}`, session_state_key: stateKey },
+    }));
+    els.push(inputEl(stateKey, '或自定义…直接输入')); // 输入即走「Type something」
+    els.push(escFooterRow(stateKey, ptsDevice));       // 中断 + 右侧终端 id（仿 Stop 卡）
+    return card2({ template: 'orange', icon: 'list_outlined', title: q.header || '方案选择', elements: els });
+}
+
+module.exports = { parseMarkdownToElements, buildFeishuTable, buildQuestionsForm, buildSingleSelectCard };

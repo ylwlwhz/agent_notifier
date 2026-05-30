@@ -324,17 +324,16 @@ async function tryAskUserQuestion(app, data, { sessionPrefix, sessionId }) {
     const questions = Array.isArray(askInput?.questions) ? askInput.questions : [];
     if (!questions.length) return false;
 
-    const { sendSingleSelectCard, sendMultiSelectCard, sendMultiQuestionFirstCard } = require('./claude-ask');
+    const { sendSingleSelectCard, sendQuestionsForm } = require('./claude-ask');
     questions.forEach(q => { q._contextText = askInput._contextText || ''; });
     const ptsDevice = resolvePtsDevice(process.ppid);
     const stateKey = `feishu_ask_${sessionPrefix}_${Date.now()}`;
 
-    if (questions.length > 1) {
-        await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, 'AskUserQuestion');
-    } else if (questions[0].multiSelect) {
-        await sendMultiSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, 'AskUserQuestion');
-    } else {
+    // 单题单选 → 按钮卡；其余 → form 卡。两者回放共用 buildReplayPlan
+    if (questions.length === 1 && !questions[0].multiSelect) {
         await sendSingleSelectCard(app, questions[0], stateKey, ptsDevice, sessionId, 'AskUserQuestion');
+    } else {
+        await sendQuestionsForm(app, questions, stateKey, ptsDevice, sessionId, 'AskUserQuestion');
     }
     return true;
 }
