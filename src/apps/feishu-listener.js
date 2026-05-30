@@ -100,12 +100,16 @@ class FeishuListener {
             'card.action.trigger': async (data) => {
                 this.lastEventTime = Date.now();
                 const result = await this.handleCardAction(data);
-                // 返回 {card,label} → 局部刷新该卡（card 须包成 {type:'raw',data}）+ toast；否则仅 toast
+                // {card,label} → 局部刷新该卡（card 须包成 {type:'raw',data}）+ toast；
+                // {toast} → 自定义类型 toast（如过期提示用 info）；字符串/其它 → success toast
                 if (result && typeof result === 'object' && result.card) {
                     return {
                         toast: { type: 'success', content: result.label || '已操作' },
                         card: { type: 'raw', data: result.card },
                     };
+                }
+                if (result && typeof result === 'object' && result.toast) {
+                    return { toast: result.toast };
                 }
                 return {
                     toast: { type: 'success', content: (typeof result === 'string' ? result : null) || '已操作' },
@@ -158,7 +162,9 @@ class FeishuListener {
         const notification = this.state.getNotification(session_state_key);
         if (!notification) {
             console.log('[feishu-listener] 通知已过期或已处理:', session_state_key);
-            return;
+            // 记录已清（默认 12h 过期）但卡片还在聊天里 → 给诚实提示，不报假「已操作」
+            const isMenu = /^feishu_(launch|ccback)_/.test(session_state_key);
+            return { toast: { type: 'info', content: isMenu ? '该菜单已过期，请重新发送 claude 或 ccback' : '该卡片已过期或已处理' } };
         }
 
         // 启动 / 接回菜单：无 pts_device，须在终端检查前分流
