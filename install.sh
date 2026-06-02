@@ -356,7 +356,7 @@ if command -v claude-remote-shell &>/dev/null; then
 else
     mkdir -p "$HOME/.local/bin"
     if command -v curl &>/dev/null; then
-        if curl -fsSL "$CRS_URL" -o "$CRS_BIN" 2>/dev/null && [ -s "$CRS_BIN" ]; then
+        if curl -fsSL --connect-timeout 10 --max-time 60 "$CRS_URL" -o "$CRS_BIN" 2>/dev/null && [ -s "$CRS_BIN" ]; then
             chmod +x "$CRS_BIN"
             ln -sf "$CRS_BIN" "$HOME/.local/bin/claude-remote-shell-yolo"
             success "claude-remote-shell ${CRS_VERSION} 已安装到 $CRS_BIN"
@@ -497,11 +497,11 @@ echo ""
 info "安装目录: $INSTALL_DIR"
 info "配置文件: $INSTALL_DIR/.env"
 info "Hooks 配置: $SETTINGS_FILE"
-info "Shell 函数: $SHELL_RC"
+info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）"
 echo ""
 info "后续步骤："
 echo "  1. 编辑 .env 填入飞书配置（如尚未配置）"
-echo "  2. 运行 source $SHELL_RC 加载 shell 函数"
+echo "  2. 重新打开终端，或 source ~/.zshenv（zsh）/ ~/.bashrc（bash）加载函数"
 echo "  3. 使用 codex() 包装函数时，可通过 CODEX_BIN 指定可执行名"
 echo ""
 success "祝使用愉快！"
