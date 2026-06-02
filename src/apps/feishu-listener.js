@@ -205,12 +205,20 @@ class FeishuListener {
                 const injected = []; // 调试日志
                 for (let i = 0; i < totalItems; i++) {
                     if (i === total && hasOther) {
-                        // Other 特殊处理：Space 打开内联输入 → 输入文本 → Enter 关闭
-                        await injectKeys(notification.pts_device, '\x20'); // Space 打开 Other 输入
+                        // Other：先 Space 选中并打开内联输入（实测必须，否则文本无处可去、Other 不被选中），
+                        // 再输入文本；之后不要按 Enter（Enter 会把 Other 取消勾选）。靠循环末尾的 Down 去 Submit。
+                        await injectKeys(notification.pts_device, '\x20'); // Space 选中 Other + 打开输入
                         injected.push(`Space@${i}(Other)`);
                         await this.sleep(300);
                         if (otherText) {
-                            await injectKeys(notification.pts_device, otherText); // 只发文本，不发 Enter
+                            // 逐字符注入：模拟人手打字。整段一次性灌入会被内联输入当粘贴丢弃，
+                            // 而该输入框靠逐字键事件捕获/自动勾选。
+                            // 末尾加一个牺牲空格：随后的 Down(ESC 序列)会确定性吞掉最后一个字符，
+                            // 让空格去挨这刀，真实文本完整保留（空格若未被吞也只是无害尾随空格）。
+                            for (const ch of otherText + ' ') {
+                                await injectKeys(notification.pts_device, ch);
+                                await this.sleep(60);
+                            }
                             injected.push(`Text("${otherText}")`);
                             await this.sleep(300);
                         }
@@ -223,14 +231,13 @@ class FeishuListener {
                     injected.push(`Down`);
                     await this.sleep(300);
                 }
-                // cursor 现在在 Submit 上
+                // cursor 现在在 Submit 上 → Enter 提交，再隔一下按 1 确认 "Submit answers"
                 injected.push('Enter');
-                await injectKeys(notification.pts_device, '\r'); // Enter 提交 checkbox
-                console.log(`[feishu-listener] 注入序列:`, injected.join(' → '), '| device:', notification.pts_device);
-
-                // 等待确认对话框 "Submit answers / Cancel"，按 1 确认
+                await injectKeys(notification.pts_device, '\r'); // Enter 提交
                 await this.sleep(500);
-                await injectKeys(notification.pts_device, '1'); // 选择 "Submit answers"
+                await injectKeys(notification.pts_device, '1'); // 确认 "Submit answers / Cancel"
+                injected.push("'1'(confirm)");
+                console.log(`[feishu-listener] 注入序列:`, injected.join(' → '), '| device:', notification.pts_device);
                 this.state.setLastInteractedDevice(notification.pts_device);
             } catch (err) {
                 console.error('[feishu-listener] 多选注入失败:', err.message);
@@ -271,7 +278,8 @@ class FeishuListener {
             // 多问题模式：删除并发送下一题；普通卡片：保留以支持多次回复
             if (notification._all_questions) {
                 this.state.removeNotification(session_state_key);
-                this.sendNextQuestion(notification, session_state_key).catch(err =>
+                // 末题经输入框回答：injectText 已带 \r 自动提交，sendNextQuestion 不再补 1
+                this.sendNextQuestion(notification, session_state_key, true).catch(err =>
                     console.error('[feishu-listener] 发送下一题失败:', err.message));
             }
             return '已发送';
@@ -317,7 +325,8 @@ class FeishuListener {
             this.state.save();
         } else if (notification._all_questions) {
             this.state.removeNotification(session_state_key);
-            this.sendNextQuestion(notification, session_state_key).catch(err =>
+            // 末题经按钮回答：只注入了选项的 \r，需 sendNextQuestion 末分支补 1 确认提交
+            this.sendNextQuestion(notification, session_state_key, false).catch(err =>
                 console.error('[feishu-listener] 发送下一题失败:', err.message));
         }
         return responseEntry.label;
@@ -326,7 +335,7 @@ class FeishuListener {
     /**
      * 多问题模式：发送下一题卡片，或最后的提交/取消卡片
      */
-    async sendNextQuestion(notification, prevStateKey) {
+    async sendNextQuestion(notification, prevStateKey, lastViaInput = false) {
         const questions = notification._all_questions;
         const nextIdx = (notification._current_q || 0) + 1;
         const chatId = notification._chat_id;
@@ -385,8 +394,19 @@ class FeishuListener {
                 console.error(`[feishu-listener] 发送 Q${nextIdx + 1} 卡片失败:`, err.message);
             }
         } else {
-            // 所有问题已回答 — 所有答案在逐题 Enter 时已注入终端，此处仅发状态通知
-            // 不存 sessionState、不带注入按钮，避免多注入一个 Enter 到错误上下文
+            // 所有问题已回答。最后一题的答案键已在 handleCardAction 注入（带 \r），原生 TUI
+            // 此刻停在 "Submit answers / Cancel"。按钮回答需补 1 确认提交（多选卡同款 Enter→1）；
+            // 输入框回答的 \r 已自动提交，不再补 1，避免多注入一个字符到后续上下文。
+            if (!lastViaInput) {
+                try {
+                    await this.sleep(500); // 等确认对话框渲染出来，否则 1 落空
+                    await injectKeys(notification.pts_device, '1');
+                    console.log('[feishu-listener] 多问题流程：末题按钮回答，已注入 1 确认提交');
+                } catch (err) {
+                    console.error('[feishu-listener] 末题确认注入失败:', err.message);
+                }
+            }
+
             const doneCard = card2({
                 template: 'green',
                 title: `全部已回答 (${totalQ} 题)`,

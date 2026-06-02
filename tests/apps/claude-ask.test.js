@@ -45,8 +45,9 @@ test('single-select card maps second option to ArrowDown plus Enter', async () =
   assert.equal(sent.length, 1);
 
   const card = sent[0];
-  const buttons = card.elements.find(el => el.tag === 'action' && el.actions?.[0]?.tag === 'button');
-  assert.equal(buttons.actions[1].value.action_type, 'opt_1');
+  // schema 2.0：选项按钮直接在 card.body.elements，无 action 容器
+  const buttons = card.body.elements.filter(el => el.tag === 'button' && /^opt_\d+$/.test(el.value?.action_type || ''));
+  assert.equal(buttons[1].value.action_type, 'opt_1');
 
   const { sessionState } = require('../../src/lib/session-state');
   const notification = sessionState.getNotification('state-single');

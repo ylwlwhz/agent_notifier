@@ -244,6 +244,20 @@ async function injectKeys(target, keys) {
  * 使用 base64 编码保留 \n 等控制字符
  */
 function injectViaFifo(fifoPath, keys) {
+    // 末尾 Enter 拆开 + 隔 60ms 单独发：否则文本+CR 经 pty-relay 一次 os.write 灌入
+    // master，被 Claude TUI 当粘贴吞掉、CR 变换行不提交（与 injectViaTmux 同源问题）。
+    // 非贪婪只剥离末尾换行串，文本内部换行保留为粘贴内容。
+    const m = keys.length > 1 ? keys.match(/^([\s\S]*?)([\r\n]+)$/) : null;
+    if (m && m[1]) {
+        writeFifoLine(fifoPath, m[1]);
+        execSync('sleep 0.06');
+        writeFifoLine(fifoPath, m[2]);
+        return true;
+    }
+    return writeFifoLine(fifoPath, keys);
+}
+
+function writeFifoLine(fifoPath, keys) {
     try {
         const encoded = Buffer.from(keys).toString('base64');
         fs.writeFileSync(fifoPath, encoded + '\n');

@@ -81,7 +81,7 @@ function makeFakeListener(FL, state, sent) {
     return listener;
 }
 
-test('多问题流程：Q1→Q2→完成，仅注入 2 次 \\r，不产生额外注入', async (t) => {
+test('多问题流程：Q1→Q2→完成，末题按钮注入序列为 \\r \\r 1（末题补确认）', async (t) => {
     const injections = [];
 
     // 在测试开始前 stub，确保 feishu-listener 内的 injectKeys 被拦截
@@ -184,10 +184,13 @@ test('多问题流程：Q1→Q2→完成，仅注入 2 次 \\r，不产生额外
     );
 
     // Q2 卡片的按钮 value 中必须携带正确的 session_state_key
-    const q2Actions = q2Card.elements?.find(el => el.tag === 'action' && el.actions?.[0]?.tag === 'button');
-    assert.ok(q2Actions, 'Q2 卡片应包含按钮 action 块');
+    // schema 2.0：按钮直接在 body.elements，无 action 容器
+    const q2OptBtn = q2Card.body?.elements?.find(
+        el => el.tag === 'button' && el.value?.action_type === 'opt_0'
+    );
+    assert.ok(q2OptBtn, 'Q2 卡片应包含 opt_0 按钮');
     assert.equal(
-        q2Actions.actions[0].value.session_state_key,
+        q2OptBtn.value.session_state_key,
         q2StateKey,
         'Q2 按钮的 session_state_key 应为 q2StateKey'
     );
@@ -202,9 +205,16 @@ test('多问题流程：Q1→Q2→完成，仅注入 2 次 \\r，不产生额外
 
     await FL.prototype.handleCardAction.call(listener, q2ActionData);
 
+    // 末题确认（sleep + 注入 '1'）是 sendNextQuestion 内 fire-and-forget，等其完成。
+    // 测试中 listener.sleep 被替换为立即 resolve，故极短等待即可。
+    await new Promise(r => setTimeout(r, 50));
+
     // 断言：第二次注入了 '\r'（Q2 第一个选项）
-    assert.equal(injections.length, 2, '点击 Q2 opt_0 后总注入次数应为 2（Q1 + Q2 各一次）');
     assert.equal(injections[1], '\r', 'Q2 opt_0 应注入纯 \\r');
+
+    // 断言：末题经按钮回答 → 完成分支补注入一次 '1' 确认提交（多选卡同款 Enter→1）
+    assert.equal(injections.length, 3, '末题按钮回答后总注入次数应为 3（Q1 \\r + Q2 \\r + 末题确认 1）');
+    assert.equal(injections[2], '1', '末题按钮回答应补注入 1 确认 "Submit answers"');
 
     // 断言：发送了"完成卡片"（green 模板，标题含"全部已回答"）
     assert.equal(sent.length, 2, '应已向飞书发送完成卡片');
@@ -216,21 +226,22 @@ test('多问题流程：Q1→Q2→完成，仅注入 2 次 \\r，不产生额外
     );
 
     // 核心回归断言：完成卡片不得有携带 session_state_key 的按钮（避免用户误点触发额外注入）
-    const doneActionBlocks = (doneCard.elements || []).filter(el => el.tag === 'action');
-    for (const block of doneActionBlocks) {
-        for (const action of (block.actions || [])) {
-            assert.ok(
-                !action.value?.session_state_key,
-                '完成卡片的按钮不应含 session_state_key（会导致额外注入）'
-            );
-        }
+    // schema 2.0：元素直接在 body.elements
+    for (const el of (doneCard.body?.elements || [])) {
+        assert.ok(
+            !el.value?.session_state_key,
+            '完成卡片的元素不应含 session_state_key（会导致额外注入）'
+        );
     }
 
-    // 核心回归断言：从头到尾总注入次数 = 2，不允许有第 3 次注入
-    assert.equal(
-        injections.length,
-        2,
-        '全程应恰好注入 2 次（每题 1 次），不得有额外注入（完成卡片 bug）'
+    // 核心回归断言：注入序列恰为 ['\r', '\r', '1']
+    //   - 每题答案各 1 次 \r
+    //   - 末题经按钮回答补 1 次 '1' 确认提交
+    //   完成卡片本身不得再注入（曾误注入额外 \n 的 bug）
+    assert.deepEqual(
+        injections,
+        ['\r', '\r', '1'],
+        "注入序列应为 ['\\r', '\\r', '1']（两题答案 + 末题按钮确认），完成卡片不得额外注入"
     );
 
     // ── 清理 ──────────────────────────────────────────────
