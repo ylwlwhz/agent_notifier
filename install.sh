@@ -275,13 +275,14 @@ echo ""
 info "正在配置 shell 函数..."
 
 # claude()/codex() 函数内容
-# 用 `type -P`（bash/zsh 通用，只查 PATH 可执行、跳过同名函数）解析真二进制，
-# 避免在 wrapper 内用 `command -v` 误拿到函数自身导致递归。
+# 解析真二进制用 `$(unset -f NAME; command -v NAME)`：子 shell 内临时移除同名函数，
+# command -v 即返回 PATH 中的可执行文件。bash 与 zsh 通用
+# （注意：`type -P` 是 bash 专有，zsh 的 type 不认 -P 会报错并返回空 → 注入空命令）。
 AGENT_FUNCS=$(cat <<'EOF'
 # ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──
 claude() {
     if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(type -P claude)" "$@"
+        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(unset -f claude 2>/dev/null; command -v claude)" "$@"
     else
         command claude "$@"
     fi
@@ -292,7 +293,7 @@ claude() {
 codex() {
     local CODEX_BIN_CMD="${CODEX_BIN:-codex}"
     if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(type -P "$CODEX_BIN_CMD")" "$@"
+        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(unset -f codex 2>/dev/null; command -v "$CODEX_BIN_CMD")" "$@"
     else
         command "$CODEX_BIN_CMD" "$@"
     fi
