@@ -219,6 +219,15 @@ echo ""
 # ── 3. 移除 shell 函数注入 ──────────────────────────────
 info "正在移除 shell 函数注入..."
 
+# 跨平台 sed -i（GNU 用 -i，BSD/macOS 用 -i ''）
+sed_inplace() {
+    if sed --version >/dev/null 2>&1; then
+        sed -i "$@"
+    else
+        sed -i '' "$@"
+    fi
+}
+
 remove_shell_injection() {
     local rc_file="$1"
     if [ ! -f "$rc_file" ]; then
@@ -228,14 +237,11 @@ remove_shell_injection() {
         return
     fi
 
-    # 使用 sed 删除注入块（从开始标记到结束标记）
-    # Claude Code PTY 中继块
-    sed -i '/^# ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Claude Code PTY 中继结束 ──$/d' "$rc_file"
-    # Codex CLI PTY 中继块
-    sed -i '/^# ── Codex CLI PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Codex CLI PTY 中继结束 ──$/d' "$rc_file"
-
+    # 删除注入块（从开始标记到结束标记）
+    sed_inplace '/^# ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Claude Code PTY 中继结束 ──$/d' "$rc_file"
+    sed_inplace '/^# ── Codex CLI PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Codex CLI PTY 中继结束 ──$/d' "$rc_file"
     # 清理可能残留的连续空行（最多保留一个）
-    sed -i '/^$/N;/^\n$/d' "$rc_file"
+    sed_inplace '/^$/N;/^\n$/d' "$rc_file"
 
     success "已从 $rc_file 移除 shell 函数"
 }
@@ -243,6 +249,8 @@ remove_shell_injection() {
 remove_shell_injection "$HOME/.zshenv"
 remove_shell_injection "$HOME/.zshrc"
 remove_shell_injection "$HOME/.bashrc"
+remove_shell_injection "$HOME/.bash_profile"
+remove_shell_injection "$HOME/.profile"
 
 echo ""
 

@@ -322,21 +322,16 @@ if command -v zsh &>/dev/null || [ -f "$HOME/.zshrc" ] || [ -f "$HOME/.zshenv" ]
     inject_funcs "$HOME/.zshenv"
 fi
 
-# bash：注入 ~/.bashrc，并确保 login shell 也加载它。
-#   bash 的 login shell 默认只读 .bash_profile/.profile，不读 .bashrc；
-#   claude-remote-shell 用 `bash -l -c` 时需 .bash_profile source .bashrc，
-#   否则函数在非交互 login 下同样缺失。
+# bash：函数注入到 login 文件（.bash_profile 优先，无则 .profile）+ .bashrc 各一份。
+#   - login 文件对 `bash -l -c`（claude-remote-shell 的非交互 login 启动）无条件执行；
+#     而 .bashrc 在很多发行版（如 Ubuntu）顶部有 `case $- in *) return` 非交互即退出，
+#     无法靠 source .bashrc 覆盖非交互 login —— 故函数必须直接进 login 文件。
+#   - 同时注入 .bashrc，覆盖"交互式非 login bash"（在已登录会话里新开 bash）。
 if command -v bash &>/dev/null; then
-    inject_funcs "$HOME/.bashrc"
-
-    # 确保某个 login 启动文件 source 了 .bashrc（幂等）
     bash_login_file="$HOME/.bash_profile"
     [ -f "$HOME/.bash_profile" ] || { [ -f "$HOME/.profile" ] && bash_login_file="$HOME/.profile"; }
-    if ! grep -qsE '(\.|source)[[:space:]]+.*\.bashrc' "$bash_login_file" 2>/dev/null; then
-        touch "$bash_login_file"
-        printf '\n# 由 claude-notifier 注入：login shell 也加载 .bashrc（remote-shell 非交互兼容）\n[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n' >> "$bash_login_file"
-        success "已确保 ${bash_login_file} 加载 .bashrc"
-    fi
+    inject_funcs "$bash_login_file"
+    inject_funcs "$HOME/.bashrc"
 fi
 
 warn "请重新打开终端，或 source 对应的 rc 文件使其生效"
@@ -356,7 +351,15 @@ if command -v claude-remote-shell &>/dev/null; then
 else
     mkdir -p "$HOME/.local/bin"
     if command -v curl &>/dev/null; then
-        if curl -fsSL --connect-timeout 10 --max-time 60 "$CRS_URL" -o "$CRS_BIN" 2>/dev/null && [ -s "$CRS_BIN" ]; then
+        # 重试 3 次：GitHub raw 偶发瞬时慢/限流，单次失败不代表网络不可用
+        crs_ok=0
+        for attempt in 1 2 3; do
+            if curl -fsSL --connect-timeout 10 --max-time 60 "$CRS_URL" -o "$CRS_BIN" 2>/dev/null && [ -s "$CRS_BIN" ]; then
+                crs_ok=1; break
+            fi
+            [ "$attempt" -lt 3 ] && sleep 2
+        done
+        if [ "$crs_ok" -eq 1 ]; then
             chmod +x "$CRS_BIN"
             ln -sf "$CRS_BIN" "$HOME/.local/bin/claude-remote-shell-yolo"
             success "claude-remote-shell ${CRS_VERSION} 已安装到 $CRS_BIN"
