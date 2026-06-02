@@ -173,3 +173,17 @@ Codex + 飞书联调至少需要这些进程在线：
   - `README.md`
   - `docs/ai_rules.md`
   - `docs/ai_docs/`
+
+## 11. 跨平台与迁移
+
+- 整套流程支持 macOS 与 Linux，可在 Linux 服务器上 `git clone` + `install.sh` 独立部署
+- shell 包装函数注入位置：zsh 用 `~/.zshenv`（非 `~/.zshrc`），bash 用 `~/.bashrc` 并确保 login shell 加载
+  - 原因：`claude-remote-shell` 用 `zsh -l -c` / `bash -l -c`（非交互 login）启动，`.zshrc`/非 source 的 `.bashrc` 不加载，会导致 PTY 中继拉不起
+- 平台相关写法必须双分支，不写死单平台：
+  - 日期：GNU `date -d` vs BSD `date -j -u -f`（见 `scripts/statusline.sh`）
+  - 逆序：`tac` vs `tail -r`
+  - 终端解析：Linux `/proc` vs macOS `ps -o tt=`（见 `src/lib/terminal-inject.js`）
+  - 运行器路径用 PATH 查找（`type -P` / `command -v`），不写死 `/opt/homebrew/...`
+- `scripts/statusline.sh` 是跨平台 statusLine 脚本，install.sh 拷到 `~/.claude/statusline.sh` 并接入 `cost-capture.js`
+- claude-remote-shell 只重定向 Bash 工具命令到远程；TUI/hooks/statusLine 全在本机，与 agent-notifier 不冲突
+

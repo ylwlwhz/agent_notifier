@@ -21,6 +21,28 @@ success() { echo -e "${GREEN}[成功]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[警告]${NC} $1"; }
 error()   { echo -e "${RED}[错误]${NC} $1"; }
 
+# ── 平台与包管理器探测（用于"缺失依赖"提示）──────────────
+OS="$(uname -s)"
+detect_pkg_hint() {
+    # $1 = 通用包名；按平台给出安装命令提示
+    local pkg="$1"
+    if [[ "$OS" == Darwin ]]; then
+        echo "brew install $pkg"
+    elif command -v apt-get &>/dev/null; then
+        echo "sudo apt-get install -y $pkg"
+    elif command -v dnf &>/dev/null; then
+        echo "sudo dnf install -y $pkg"
+    elif command -v yum &>/dev/null; then
+        echo "sudo yum install -y $pkg"
+    elif command -v pacman &>/dev/null; then
+        echo "sudo pacman -S $pkg"
+    elif command -v zypper &>/dev/null; then
+        echo "sudo zypper install $pkg"
+    else
+        echo "（请用系统包管理器安装 $pkg）"
+    fi
+}
+
 # ── 1. 检查依赖 ──────────────────────────────────────────
 info "正在检查系统依赖..."
 
@@ -50,6 +72,36 @@ fi
 if [ "$missing" -eq 1 ]; then
     error "缺少必要依赖，请安装后重新运行此脚本"
     exit 1
+fi
+
+# ── 1.2 增强依赖检测（缺失只警告 + 给安装命令，不中断）──────
+# jq：statusLine 脚本需要；bun/npx：跑 ccusage 需要；mutagen：claude-remote-shell 需要
+info "正在检查增强依赖（statusLine / ccusage / claude-remote-shell）..."
+
+if command -v jq &>/dev/null; then
+    success "jq $(jq --version 2>&1)"
+else
+    warn "未找到 jq（statusLine 时间戳解析需要）。安装：$(detect_pkg_hint jq)"
+fi
+
+if command -v bun &>/dev/null; then
+    success "bun $(bun --version 2>&1)"
+elif command -v bunx &>/dev/null; then
+    success "bunx 可用"
+elif command -v npx &>/dev/null; then
+    success "npx 可用（将用 npx 运行 ccusage）"
+else
+    warn "未找到 bun/bunx/npx（statusLine 的 ccusage 需要其一）。建议安装 bun：curl -fsSL https://bun.sh/install | bash"
+fi
+
+if command -v mutagen &>/dev/null; then
+    success "mutagen $(mutagen version 2>&1 | head -1)"
+else
+    if [[ "$OS" == Darwin ]]; then
+        warn "未找到 mutagen（claude-remote-shell 远程同步需要）。安装：brew install mutagen-io/mutagen/mutagen"
+    else
+        warn "未找到 mutagen（claude-remote-shell 远程同步需要）。安装见：https://github.com/mutagen-io/mutagen/releases"
+    fi
 fi
 
 echo ""
@@ -179,24 +231,57 @@ if (changed) {
 success "Claude Code Hooks 配置完成"
 echo ""
 
+# ── 4.5 配置 statusLine（cost-capture + 跨平台 statusline.sh）──
+info "正在配置 statusLine..."
+
+STATUSLINE_SRC="$INSTALL_DIR/scripts/statusline.sh"
+STATUSLINE_DST="$HOME/.claude/statusline.sh"
+
+if [ ! -f "$STATUSLINE_SRC" ]; then
+    warn "未找到 $STATUSLINE_SRC，跳过 statusLine 配置"
+else
+    # 拷贝 statusline.sh（若用户已有且不同则备份）
+    if [ -f "$STATUSLINE_DST" ] && ! cmp -s "$STATUSLINE_SRC" "$STATUSLINE_DST"; then
+        cp "$STATUSLINE_DST" "${STATUSLINE_DST}.bak.$(date +%s 2>/dev/null || echo bak)"
+        warn "已备份原 statusline.sh 为 ${STATUSLINE_DST}.bak.*"
+    fi
+    cp "$STATUSLINE_SRC" "$STATUSLINE_DST"
+    chmod +x "$STATUSLINE_DST"
+
+    # 把 statusLine.command 接成：cost-capture.js（旁路抓官方成本）| statusline.sh
+    # 幂等：已是该命令则跳过；用户有自定义 statusLine 则备份 settings 并提示，不静默覆盖
+    STATUSLINE_CMD="node $INSTALL_DIR/src/apps/cost-capture.js | $STATUSLINE_DST"
+    node -e "
+const fs = require('fs');
+const p = '$SETTINGS_FILE';
+const want = '$STATUSLINE_CMD';
+let s;
+try { s = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { s = {}; }
+const cur = s.statusLine && s.statusLine.command;
+if (cur === want) { console.log('  - statusLine 已配置，跳过'); process.exit(0); }
+if (s.statusLine && cur && !cur.includes('cost-capture.js') && !cur.includes('$STATUSLINE_DST')) {
+    fs.writeFileSync(p + '.bak', JSON.stringify(s, null, 2) + '\n');
+    console.log('  ! 检测到自定义 statusLine，已备份 settings.json.bak 后覆盖');
+}
+s.statusLine = { type: 'command', command: want, padding: 0 };
+fs.writeFileSync(p, JSON.stringify(s, null, 2) + '\n');
+console.log('  + statusLine 已接入 cost-capture + statusline.sh');
+"
+    success "statusLine 配置完成"
+fi
+echo ""
+
 # ── 5. 注入 shell 函数 ───────────────────────────────────
 info "正在配置 shell 函数..."
 
-# 确定 shell 配置文件
-if [ -n "${ZSH_VERSION:-}" ] || [ -f "$HOME/.zshrc" ]; then
-    SHELL_RC="$HOME/.zshrc"
-elif [ -f "$HOME/.bashrc" ]; then
-    SHELL_RC="$HOME/.bashrc"
-else
-    SHELL_RC="$HOME/.bashrc"
-fi
-
 # claude()/codex() 函数内容
+# 用 `type -P`（bash/zsh 通用，只查 PATH 可执行、跳过同名函数）解析真二进制，
+# 避免在 wrapper 内用 `command -v` 误拿到函数自身导致递归。
 AGENT_FUNCS=$(cat <<'EOF'
 # ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──
 claude() {
     if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(whence -p claude 2>/dev/null || type -P claude 2>/dev/null || which claude)" "$@"
+        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(type -P claude)" "$@"
     else
         command claude "$@"
     fi
@@ -207,7 +292,7 @@ claude() {
 codex() {
     local CODEX_BIN_CMD="${CODEX_BIN:-codex}"
     if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$CODEX_BIN_CMD" "$@"
+        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(type -P "$CODEX_BIN_CMD")" "$@"
     else
         command "$CODEX_BIN_CMD" "$@"
     fi
@@ -217,16 +302,77 @@ EOF
 )
 AGENT_FUNCS=${AGENT_FUNCS//__INSTALL_DIR__/$INSTALL_DIR}
 
-# 幂等检查：只在不存在时注入
-if grep -q "Claude Code PTY 中继" "$SHELL_RC" 2>/dev/null && grep -q "Codex CLI PTY 中继" "$SHELL_RC" 2>/dev/null; then
-    success "shell 函数已存在于 $SHELL_RC，跳过"
-else
-    echo "" >> "$SHELL_RC"
-    echo "$AGENT_FUNCS" >> "$SHELL_RC"
-    success "已将 claude()/codex() 函数注入 $SHELL_RC"
-    warn "请运行 source $SHELL_RC 或重新打开终端使其生效"
+# 幂等注入到指定 rc 文件
+inject_funcs() {
+    local rc_file="$1"
+    if grep -q "Claude Code PTY 中继" "$rc_file" 2>/dev/null && grep -q "Codex CLI PTY 中继" "$rc_file" 2>/dev/null; then
+        success "shell 函数已存在于 ${rc_file}，跳过"
+    else
+        touch "$rc_file"
+        printf '\n%s\n' "$AGENT_FUNCS" >> "$rc_file"
+        success "已将 claude()/codex() 函数注入 ${rc_file}"
+    fi
+}
+
+# zsh：注入 ~/.zshenv 而非 ~/.zshrc。
+#   .zshenv 对所有 zsh 都加载（含 login 非交互），claude-remote-shell 的
+#   `zsh -l -c "exec claude ..."` 才能解析到函数、拉起 pty-relay；
+#   .zshrc 仅交互式加载，非交互路径会漏掉。
+if command -v zsh &>/dev/null || [ -f "$HOME/.zshrc" ] || [ -f "$HOME/.zshenv" ]; then
+    inject_funcs "$HOME/.zshenv"
 fi
 
+# bash：注入 ~/.bashrc，并确保 login shell 也加载它。
+#   bash 的 login shell 默认只读 .bash_profile/.profile，不读 .bashrc；
+#   claude-remote-shell 用 `bash -l -c` 时需 .bash_profile source .bashrc，
+#   否则函数在非交互 login 下同样缺失。
+if command -v bash &>/dev/null; then
+    inject_funcs "$HOME/.bashrc"
+
+    # 确保某个 login 启动文件 source 了 .bashrc（幂等）
+    bash_login_file="$HOME/.bash_profile"
+    [ -f "$HOME/.bash_profile" ] || { [ -f "$HOME/.profile" ] && bash_login_file="$HOME/.profile"; }
+    if ! grep -qsE '(\.|source)[[:space:]]+.*\.bashrc' "$bash_login_file" 2>/dev/null; then
+        touch "$bash_login_file"
+        printf '\n# 由 claude-notifier 注入：login shell 也加载 .bashrc（remote-shell 非交互兼容）\n[ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"\n' >> "$bash_login_file"
+        success "已确保 ${bash_login_file} 加载 .bashrc"
+    fi
+fi
+
+warn "请重新打开终端，或 source 对应的 rc 文件使其生效"
+
+echo ""
+
+# ── 5.5 安装 claude-remote-shell（可选能力，总是尝试安装）──
+# 本体是单个 bash 脚本；macOS 若已 brew 安装则跳过。依赖的 mutagen 不自动装（见上方提示）。
+info "正在配置 claude-remote-shell..."
+
+CRS_VERSION="v0.1.4"
+CRS_URL="https://raw.githubusercontent.com/torarnv/claude-remote-shell/${CRS_VERSION}/claude-remote-shell"
+CRS_BIN="$HOME/.local/bin/claude-remote-shell"
+
+if command -v claude-remote-shell &>/dev/null; then
+    success "claude-remote-shell 已安装（$(command -v claude-remote-shell)），跳过"
+else
+    mkdir -p "$HOME/.local/bin"
+    if command -v curl &>/dev/null; then
+        if curl -fsSL "$CRS_URL" -o "$CRS_BIN" 2>/dev/null && [ -s "$CRS_BIN" ]; then
+            chmod +x "$CRS_BIN"
+            ln -sf "$CRS_BIN" "$HOME/.local/bin/claude-remote-shell-yolo"
+            success "claude-remote-shell ${CRS_VERSION} 已安装到 $CRS_BIN"
+            case ":$PATH:" in
+                *":$HOME/.local/bin:"*) ;;
+                *) warn "请确保 \$HOME/.local/bin 在 PATH 中（可加入 rc 文件）" ;;
+            esac
+            command -v mutagen &>/dev/null || warn "claude-remote-shell 需要 mutagen 才能运行（见上方安装提示）"
+        else
+            rm -f "$CRS_BIN"
+            warn "claude-remote-shell 下载失败（网络或 tag 变动），跳过。手动安装见 https://github.com/torarnv/claude-remote-shell"
+        fi
+    else
+        warn "未找到 curl，无法自动安装 claude-remote-shell。手动安装见 https://github.com/torarnv/claude-remote-shell"
+    fi
+fi
 echo ""
 
 # ── 6. 配置并启动飞书监听器服务 ──────────────────────────

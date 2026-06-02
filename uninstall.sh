@@ -181,6 +181,41 @@ fi
 
 echo ""
 
+# ── 2.5 还原 statusLine ─────────────────────────────────
+info "正在还原 statusLine..."
+
+if [ -f "$SETTINGS_FILE" ]; then
+    node -e "
+const fs = require('fs');
+const p = '$SETTINGS_FILE';
+const installDir = '$INSTALL_DIR';
+let s;
+try { s = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { process.exit(0); }
+const cur = s.statusLine && s.statusLine.command;
+if (cur && (cur.includes(installDir + '/src/apps/cost-capture.js') || cur.includes('/.claude/statusline.sh'))) {
+    if (fs.existsSync(p + '.bak')) {
+        // 还原安装时备份的用户原配置
+        try {
+            const bak = JSON.parse(fs.readFileSync(p + '.bak', 'utf8'));
+            s.statusLine = bak.statusLine;
+            console.log('  - 已从 settings.json.bak 还原原 statusLine');
+        } catch { delete s.statusLine; console.log('  - .bak 解析失败，已移除 statusLine'); }
+    } else {
+        delete s.statusLine;
+        console.log('  - 已移除本项目接入的 statusLine');
+    }
+    fs.writeFileSync(p, JSON.stringify(s, null, 2) + '\n');
+} else {
+    console.log('  无本项目的 statusLine 需要还原');
+}
+"
+    success "statusLine 已处理"
+else
+    info "未找到 $SETTINGS_FILE，跳过"
+fi
+
+echo ""
+
 # ── 3. 移除 shell 函数注入 ──────────────────────────────
 info "正在移除 shell 函数注入..."
 
@@ -205,6 +240,7 @@ remove_shell_injection() {
     success "已从 $rc_file 移除 shell 函数"
 }
 
+remove_shell_injection "$HOME/.zshenv"
 remove_shell_injection "$HOME/.zshrc"
 remove_shell_injection "$HOME/.bashrc"
 
@@ -244,7 +280,9 @@ echo -e "${GREEN}  卸载完成！${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo ""
 info "已保留: .env (用户配置), node_modules/ (依赖)"
-info "如需完全清除，请手动执行:"
+info "以下为共享/可能用户自管的组件，未自动移除，如需清除请手动执行:"
 echo "  rm -f $INSTALL_DIR/.env"
 echo "  rm -rf $INSTALL_DIR/node_modules"
+echo "  rm -f $HOME/.claude/statusline.sh    # statusLine 脚本"
+echo "  rm -f $HOME/.local/bin/claude-remote-shell{,-yolo}  # 仅当由本脚本安装"
 echo ""

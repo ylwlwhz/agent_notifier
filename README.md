@@ -152,11 +152,44 @@ The uninstall script cleans up:
 
 ## Cross-Platform Support
 
+The full stack runs identically on macOS and Linux, and can be deployed standalone on a Linux server:
+
+```bash
+git clone <repo-url> && cd agent_notifier
+cp .env.example .env && $EDITOR .env   # set FEISHU_APP_ID / FEISHU_APP_SECRET
+bash install.sh                        # one-shot install (incl. statusLine, claude-remote-shell)
+claude
+```
+
+### Three components
+
+| Component | Role | Install |
+|-----------|------|---------|
+| **agent-notifier** | Feishu interactive cards + remote input injection (this repo) | `install.sh`, fully automatic |
+| **ccusage statusline** | Status-bar cost/duration + `cost-capture.js` feeding official metrics to completion cards | `install.sh` wires up cross-platform `scripts/statusline.sh` |
+| **claude-remote-shell** | Redirects Claude's Bash tool commands to a remote host over SSH (optional) | `install.sh` fetches the script; mutagen installed separately |
+
+They are layer-separated and do not conflict: claude-remote-shell only redirects Bash tool commands, while TUI / hooks / statusLine all run locally.
+
+### Dependencies
+
+| Dependency | Required | Purpose | Install (Linux / macOS) |
+|------------|----------|---------|------------------------|
+| node ≥18, npm | yes | runtime | `apt install nodejs npm` / `brew install node` |
+| python3 | yes | pty-relay | built-in / `brew install python3` |
+| jq | enhanced | statusLine timestamp parsing | `apt install jq` / `brew install jq` |
+| bun or npx | enhanced | run ccusage | `curl -fsSL https://bun.sh/install \| bash` |
+| mutagen | enhanced | claude-remote-shell sync | [releases](https://github.com/mutagen-io/mutagen/releases) / `brew install mutagen-io/mutagen/mutagen` |
+
+> Missing enhanced dependencies only trigger a warning with the install command — they do not abort installation.
+
 | Platform | Service Management | Auto-Start on Boot |
 |----------|-------------------|--------------------|
 | macOS | launchd (`~/Library/LaunchAgents/`) | `RunAtLoad` + `KeepAlive` |
 | Linux (with systemd user session) | systemd user service | `systemctl --user enable` |
 | Linux (no systemd, e.g. pure SSH) | nohup + crontab `@reboot` | crontab fallback |
+
+> Shell functions: zsh → `~/.zshenv`, bash → `~/.bashrc` (with login-shell sourcing), so non-interactive login shells (e.g. `claude-remote-shell` startup) also load the PTY relay wrappers.
 
 ### Service Management Commands
 

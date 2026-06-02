@@ -17,7 +17,8 @@
     "codex:e2e:cards": "node scripts/send-codex-feishu-test-cards.js",
     "codex:feed:text": "node scripts/send-codex-assistant-feed.js",
     "codex:send:text": "node scripts/send-codex-assistant-direct.js",
-    "ask:e2e:card": "node scripts/send-claude-ask-test-card.js"
+    "ask:e2e:card": "node scripts/send-claude-ask-test-card.js",
+    "statusline:install": "mkdir -p \"$HOME/.claude\" && cp scripts/statusline.sh \"$HOME/.claude/statusline.sh\" && chmod +x \"$HOME/.claude/statusline.sh\" && echo '已更新 ~/.claude/statusline.sh（settings.json 接入请运行 ./install.sh）'"
   },
   "keywords": [],
   "author": "",

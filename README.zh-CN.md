@@ -106,12 +106,14 @@ bash install.sh
 ```
 
 安装脚本会自动完成：
-- 检查依赖（Node.js、npm、python3）
+- 检查依赖（必需：Node.js、npm、python3；增强：jq、bun/npx、mutagen — 缺失只警告并给出对应平台安装命令）
 - **清理旧配置**（自动调用 `uninstall.sh`）
 - 安装 Node.js 依赖
 - 从 `.env.example` 创建 `.env`（如不存在）
 - 写入 Claude Code hooks 到 `~/.claude/settings.json`
-- 注入 `claude` / `codex` shell 包装函数
+- **配置 statusLine**（拷贝跨平台 `scripts/statusline.sh` 到 `~/.claude/`，接入 `cost-capture.js` 抓官方成本/时长/上下文）
+- 注入 `claude` / `codex` shell 包装函数（zsh 写入 `~/.zshenv`、bash 写入 `~/.bashrc` 并确保 login shell 加载 — 保证 `claude-remote-shell` 的非交互 login 也能拉起 PTY 中继）
+- **安装 claude-remote-shell**（从官方仓库拉取脚本到 `~/.local/bin`；mutagen 需另装）
 - **自动启动飞书监听器并注册开机自启**
 
 > 重复运行 `install.sh` 是安全的 — 每次会先清理再重新安装。
@@ -119,8 +121,9 @@ bash install.sh
 ### 4. 重新加载 shell
 
 ```bash
-source ~/.zshrc
+source ~/.zshenv   # zsh：函数已移至 .zshenv（对所有 zsh 加载，含非交互 login）
 # 或 source ~/.bashrc
+# 最稳妥：重新打开一个终端
 ```
 
 ### 5. 开始使用
@@ -216,6 +219,48 @@ SOUND_ENABLED=true
 - 也可以组合：`tools,output,results`
 
 Codex 的输出来自 `~/.codex/sessions/*.jsonl`，不是靠终端文本猜测。
+
+---
+
+## 跨平台部署（macOS / Linux 服务器）
+
+整套流程在 macOS 与 Linux 上行为一致，可在一台 Linux 服务器上独立运行：
+
+```bash
+git clone <repo-url> && cd agent_notifier
+cp .env.example .env && $EDITOR .env   # 填 FEISHU_APP_ID / FEISHU_APP_SECRET
+bash install.sh                        # 一键安装（含 statusLine、claude-remote-shell）
+# 重新打开终端，或 source ~/.zshenv（zsh）/ ~/.bashrc（bash）
+claude
+```
+
+### 三个组件的关系
+
+| 组件 | 角色 | 安装方式 |
+|------|------|---------|
+| **agent-notifier** | 飞书交互卡通知 + 远程输入回注（本仓库） | `install.sh` 全自动 |
+| **ccusage statusline** | 状态栏成本/时长 + `cost-capture.js` 抓官方数据供完成卡显示 | `install.sh` 自动接入跨平台 `scripts/statusline.sh` |
+| **claude-remote-shell** | 把 Claude 的 Bash 工具命令 ssh 到远程机执行（可选） | `install.sh` 拉取脚本；mutagen 需另装 |
+
+三者**互不冲突、按层分离**：claude-remote-shell 只重定向 Bash 工具命令，TUI / hooks / statusLine 全在本机运行，agent-notifier 的发卡与回注照常工作。
+
+### 依赖清单
+
+| 依赖 | 必需 | 用途 | 安装（Linux / macOS） |
+|------|------|------|---------------------|
+| node ≥18、npm | ✅ | 运行时 | `apt install nodejs npm` / `brew install node` |
+| python3 | ✅ | pty-relay PTY 中继 | 系统自带 / `brew install python3` |
+| jq | 增强 | statusLine 解析时间戳 | `apt install jq` / `brew install jq` |
+| bun 或 npx | 增强 | 运行 ccusage | `curl -fsSL https://bun.sh/install \| bash` |
+| mutagen | 增强 | claude-remote-shell 文件同步 | [releases](https://github.com/mutagen-io/mutagen/releases) / `brew install mutagen-io/mutagen/mutagen` |
+
+> 增强依赖缺失时 `install.sh` 只警告并打印安装命令，不中断安装。
+
+### Linux 平台说明
+
+- **服务托管**：有 systemd user session 用 `systemctl --user`，否则回退 `crontab @reboot` + nohup
+- **终端注入**：Linux 原生走 `/proc` 解析 pts，无需 macOS 的 `ps -o tt=` 分支
+- **shell 函数**：zsh 注入 `~/.zshenv`、bash 注入 `~/.bashrc` 且确保 login shell 加载，保证非交互 login（如 `claude-remote-shell` 启动）也能拉起 PTY 中继
 
 ---
 
