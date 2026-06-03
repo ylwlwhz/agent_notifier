@@ -271,10 +271,18 @@ function writeFifoLine(fifoPath, keys) {
  * 通过 tmux send-keys 注入
  */
 function injectViaTmux(target, keys) {
-    // 逐字符处理特殊键
+    // 逐字符处理特殊键。注意：方向键是多字节 ESC 序列（\x1b[A/B/C/D），必须整体识别
+    // 成 tmux 具名键 Up/Down/...，否则会被逐字节拆成 Escape + '[' + 'B'（4 个独立键），
+    // Claude TUI 收到的就不是方向键、选项导航错乱。
+    const ARROW = { A: 'Up', B: 'Down', C: 'Right', D: 'Left' };
     const parts = [];
-    for (const ch of keys) {
-        if (ch === '\n' || ch === '\r') parts.push('Enter');
+    for (let i = 0; i < keys.length; i++) {
+        const ch = keys[i];
+        if (ch === '\x1b' && keys[i + 1] === '[' && ARROW[keys[i + 2]]) {
+            parts.push(ARROW[keys[i + 2]]); // \x1b[A/B/C/D → Up/Down/Right/Left
+            i += 2;
+        }
+        else if (ch === '\n' || ch === '\r') parts.push('Enter');
         else if (ch === '\x1b') parts.push('Escape');
         else if (ch === '\t') parts.push('Tab');
         else if (ch === '\x7f' || ch === '\b') parts.push('BSpace');
