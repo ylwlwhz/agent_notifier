@@ -33,6 +33,23 @@ class EnvConfig {
         } catch (error) {
             console.log('❌ 环境变量加载失败:', error.message);
         }
+
+        // 飞书/Lark 是国内服务，而本机 http_proxy 常指向境外代理；
+        // 若不放行，Lark SDK(axios) 会把飞书 API 也走代理并被 403 拦截，导致卡片发不出。
+        // 这里统一把飞书域名追加进 no_proxy，确保任何启动方式(含 tmux 内继承代理)都直连飞书。
+        this.ensureFeishuNoProxy();
+    }
+
+    /** 确保飞书/Lark 域名绕过 http(s)_proxy，幂等合并已有 no_proxy */
+    ensureFeishuNoProxy() {
+        const feishuHosts = ['open.feishu.cn', 'feishu.cn', 'open.larksuite.com', 'larksuite.com'];
+        for (const key of ['no_proxy', 'NO_PROXY']) {
+            const set = new Set(
+                (process.env[key] || '').split(',').map((s) => s.trim()).filter(Boolean)
+            );
+            feishuHosts.forEach((h) => set.add(h));
+            process.env[key] = Array.from(set).join(',');
+        }
     }
 
     /**
