@@ -112,7 +112,7 @@ bash install.sh
 - 从 `.env.example` 创建 `.env`（如不存在）
 - 写入 Claude Code hooks 到 `~/.claude/settings.json`
 - **配置 statusLine**（拷贝跨平台 `scripts/statusline.sh` 到 `~/.claude/`，接入 `cost-capture.js` 抓官方成本/时长/上下文）
-- 注入 `claude` / `codex` shell 包装函数（zsh 写入 `~/.zshenv`、bash 写入 `~/.bashrc` 并确保 login shell 加载 — 保证 `claude-remote-shell` 的非交互 login 也能拉起 PTY 中继）
+- 注入 `claude` / `codex` shell 包装函数（zsh 写 `~/.zshenv`；bash 写 login 文件 `~/.bash_profile`（无则 `~/.profile`）**和** `~/.bashrc` 各一份 — 仅写 `.bashrc` 不够，多数发行版默认 `.bashrc` 对非交互 shell 提前 return，故函数必须直接进 login 文件，保证 `claude-remote-shell` 的 `bash -l -c` 非交互 login 也能拉起 PTY 中继）
 - **安装 claude-remote-shell**（从官方仓库拉取脚本到 `~/.local/bin`；mutagen 需另装）
 - **自动启动飞书监听器并注册开机自启**
 
@@ -146,7 +146,7 @@ bash uninstall.sh
 - 停止并移除飞书监听器服务（launchd / systemd / crontab）
 - 终止后台进程（feishu-listener、codex-watcher、codex-session-watcher、pty-relay）
 - 从 `~/.claude/settings.json` 移除 hooks
-- 从 `~/.zshrc` / `~/.bashrc` 移除 shell 函数注入
+- 从 `~/.zshenv` / `~/.zshrc` / `~/.bashrc` / `~/.bash_profile` / `~/.profile` 移除 shell 函数注入
 - 清理运行时文件（session-state、pid、log、/tmp 缓冲文件）
 
 > `.env` 和 `node_modules/` 会保留，如需完全清除请手动删除。
@@ -260,7 +260,7 @@ claude
 
 - **服务托管**：有 systemd user session 用 `systemctl --user`，否则回退 `crontab @reboot` + nohup
 - **终端注入**：Linux 原生走 `/proc` 解析 pts，无需 macOS 的 `ps -o tt=` 分支
-- **shell 函数**：zsh 注入 `~/.zshenv`、bash 注入 `~/.bashrc` 且确保 login shell 加载，保证非交互 login（如 `claude-remote-shell` 启动）也能拉起 PTY 中继
+- **shell 函数**：zsh 注入 `~/.zshenv`；bash 注入 login 文件（`~/.bash_profile`/`~/.profile`）和 `~/.bashrc` 各一份。⚠️ 仅注入 `.bashrc` 无效——Ubuntu 默认 `.bashrc` 顶部 `case $- in *) return` 非交互即退出，故必须直接进 login 文件，保证 `claude-remote-shell` 的非交互 login 也能拉起 PTY 中继
 
 ---
 

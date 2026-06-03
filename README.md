@@ -143,7 +143,7 @@ The uninstall script cleans up:
 - Stops and removes the Feishu listener service (launchd / systemd / crontab)
 - Terminates background processes (feishu-listener, codex-watcher, codex-session-watcher, pty-relay)
 - Removes hooks from `~/.claude/settings.json`
-- Removes shell function injections from `~/.zshrc` / `~/.bashrc`
+- Removes shell function injections from `~/.zshenv` / `~/.zshrc` / `~/.bashrc` / `~/.bash_profile` / `~/.profile`
 - Cleans up runtime files (session-state, pid, log, /tmp buffer files)
 
 > `.env` and `node_modules/` are preserved. Delete them manually if you want a full cleanup.
@@ -189,7 +189,7 @@ They are layer-separated and do not conflict: claude-remote-shell only redirects
 | Linux (with systemd user session) | systemd user service | `systemctl --user enable` |
 | Linux (no systemd, e.g. pure SSH) | nohup + crontab `@reboot` | crontab fallback |
 
-> Shell functions: zsh → `~/.zshenv`, bash → `~/.bashrc` (with login-shell sourcing), so non-interactive login shells (e.g. `claude-remote-shell` startup) also load the PTY relay wrappers.
+> Shell functions: zsh → `~/.zshenv`; bash → login file (`~/.bash_profile` or `~/.profile`) **and** `~/.bashrc`. Injecting only `.bashrc` is not enough — many distros' default `.bashrc` returns early for non-interactive shells, so the wrapper must go directly into the login file. This ensures non-interactive login shells (e.g. `claude-remote-shell` startup via `bash -l -c`) also load the PTY relay wrappers.
 
 ### Service Management Commands
 
