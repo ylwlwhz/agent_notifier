@@ -121,6 +121,7 @@ async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notif
         _multi_select: true,
         _selected: [],
         _ms_options: q.options.map(o => o.label),
+        _ms_descriptions: q.options.map(o => o.description || ''),
         _ms_total: q.options.length,
         _question: q.question || '',
         _context_text: q._contextText || '',
@@ -152,7 +153,7 @@ async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, noti
         title: q.header || '方案选择',
         contextText: q._contextText || '',
         question: q.question || '',
-        options: q.options.map(o => o.label),
+        options: q.options, // 传完整 {label, description}，卡片在按钮下展示说明
         stateKey, noteParts,
         mdToEls: parseMarkdownToElements,
     });
@@ -224,7 +225,7 @@ async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, s
         title: `${q.header || '选择'} (1/${questions.length})`,
         contextText,
         question: q.question || '',
-        options: q.options.map(o => o.label),
+        options: q.options, // 传完整 {label, description}
         stateKey, noteParts,
         mdToEls: parseMarkdownToElements,
     });

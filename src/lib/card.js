@@ -60,7 +60,14 @@ function selectCard({ template = 'orange', title, tags, contextText, question, o
     const els = [];
     if (contextText) { els.push(...mdToEls(contextText)); els.push({ tag: 'hr' }); }
     if (question) els.push(...mdToEls(question));
-    options.forEach((label, i) => els.push({ tag: 'button', text: { tag: 'plain_text', content: label }, type: i === 0 ? 'primary' : 'default', value: { action_type: `opt_${i}`, session_state_key: stateKey } }));
+    // 选项支持字符串或 {label, description}：按钮显示 label，按钮下灰字补 description。
+    // description 只是展示行，不新增按钮，opt_N → 第 N 个选项的箭头导航映射不受影响。
+    options.forEach((opt, i) => {
+        const label = typeof opt === 'string' ? opt : (opt && opt.label) || '';
+        const desc = typeof opt === 'string' ? '' : (opt && opt.description) || '';
+        els.push({ tag: 'button', text: { tag: 'plain_text', content: label }, type: i === 0 ? 'primary' : 'default', value: { action_type: `opt_${i}`, session_state_key: stateKey } });
+        if (desc) els.push({ tag: 'markdown', content: `<font color='grey'>${desc}</font>` });
+    });
     els.push({ tag: 'button', text: { tag: 'plain_text', content: '💬 Other' }, type: 'default', value: { action_type: 'opt_other', session_state_key: stateKey } });
     els.push(inputEl(stateKey, '输入自定义回答...'));
     els.push(escButton(stateKey));

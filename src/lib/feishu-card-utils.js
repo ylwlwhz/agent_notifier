@@ -127,8 +127,12 @@ function buildMultiSelectCard(notification, stateKey) {
         elements.push({ tag: 'hr' });
     }
 
-    // 问题 + 编号列表（含 Other）
-    const optList = options.map((opt, i) => `**${i + 1}.** ${opt}`).join('\n');
+    // 问题 + 编号列表（含 Other）；有说明则在编号下补一行灰字
+    const descriptions = notification._ms_descriptions || [];
+    const optList = options.map((opt, i) => {
+        const d = descriptions[i];
+        return d ? `**${i + 1}.** ${opt}\n<font color='grey'>${d}</font>` : `**${i + 1}.** ${opt}`;
+    }).join('\n');
     const otherNum = options.length + 1;
     elements.push({ tag: 'markdown', content: `${question}\n\n${optList}\n**${otherNum}.** Other（自定义文本）\n\n输入编号（空格分隔），选 Other 加冒号写文本：\n如 \`1 3\` 或 \`1 ${otherNum}:我的文本\`` });
 

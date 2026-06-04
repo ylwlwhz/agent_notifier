@@ -90,11 +90,17 @@ class FeishuListener {
                 this.lastEventTime = Date.now();
                 const result = await this.handleCardAction(data);
                 // 其他操作弹 toast
-                if (result && typeof result === 'object' && result.card) {
-                    return {
-                        toast: { type: 'success', content: result.label || '已操作' },
-                        card: result.card,
-                    };
+                if (result && typeof result === 'object') {
+                    if (result.card) {
+                        return {
+                            toast: { type: 'success', content: result.label || '已操作' },
+                            card: result.card,
+                        };
+                    }
+                    // handler 显式给了 toast（如通知过期/终端缺失）→ 原样透出，不再假成功
+                    if (result.toast) {
+                        return { toast: result.toast };
+                    }
                 }
                 return {
                     toast: { type: 'success', content: (typeof result === 'string' ? result : null) || '已操作' },
@@ -148,13 +154,14 @@ class FeishuListener {
         const notification = this.state.getNotification(session_state_key);
         if (!notification) {
             console.log('[feishu-listener] 通知已过期或已处理:', session_state_key);
-            return;
+            // 诚实反馈：这张卡的通知已不在（多因重装清空 state 或已处理），别再弹绿色"已操作"
+            return { toast: { type: 'warning', content: '⚠️ 该卡片已过期，请在终端重新触发' } };
         }
 
         // Check terminal target
         if (!notification.pts_device) {
             console.log('[feishu-listener] 终端未找到，无法注入');
-            return;
+            return { toast: { type: 'error', content: '未找到目标终端，无法注入' } };
         }
 
         if (notification.host === 'codex') {
@@ -379,7 +386,7 @@ class FeishuListener {
             const qCard = selectCard({
                 title: `${q.header || '选择'} (${nextIdx + 1}/${totalQ})`,
                 question: q.question || '',
-                options: q.options.map(o => o.label),
+                options: q.options, // 传完整 {label, description}
                 stateKey: newStateKey, noteParts,
                 mdToEls: parseMarkdownToElements,
             });
