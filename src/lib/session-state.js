@@ -5,11 +5,50 @@ const path = require('path');
 const { createSessionStore } = require('../core/session-store');
 const { createCardStateStore } = require('../core/card-state-store');
 
+/** 同步睡眠（不空转 CPU），用于文件锁自旋等待 */
+function sleepSync(ms) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 class SessionState {
     constructor(statePath) {
         this.statePath = statePath || path.join(__dirname, '..', 'session-state.json');
         this.tmpPath = this.statePath + '.tmp';
+        this.lockPath = this.statePath + '.lock';
         this.data = {};
+    }
+
+    /**
+     * 跨进程文件锁，串行化"读-改-写"，防止多个 claude 会话的 hook 并发写时互相覆盖（lost update）。
+     * mkdir 在 POSIX 下原子：抢到目录即持锁。带陈旧锁接管与超时降级，保证不会永久阻塞。
+     */
+    _withLock(fn) {
+        const STALE_MS = 3000;   // 锁目录存在超过此时长视为陈旧（持锁进程已崩溃）
+        const TIMEOUT_MS = 5000; // 等不到锁就降级为无锁执行，宁可偶发竞态也不卡死 hook
+        const deadline = Date.now() + TIMEOUT_MS;
+        let held = false;
+        while (true) {
+            try {
+                fs.mkdirSync(this.lockPath);
+                held = true;
+                break;
+            } catch (err) {
+                if (err.code !== 'EEXIST') break; // 异常文件系统：直接降级执行
+                try {
+                    if (Date.now() - fs.statSync(this.lockPath).mtimeMs > STALE_MS) {
+                        fs.rmdirSync(this.lockPath);
+                        continue; // 接管陈旧锁后重试
+                    }
+                } catch {}
+                if (Date.now() > deadline) break; // 超时降级
+                sleepSync(20);
+            }
+        }
+        try {
+            return fn();
+        } finally {
+            if (held) { try { fs.rmdirSync(this.lockPath); } catch {} }
+        }
     }
 
     /**
@@ -52,21 +91,23 @@ class SessionState {
      * - Caps total entries at MAX_ENTRIES (default 200)
      */
     addNotification(messageId, entry) {
-        this.load();
+        this._withLock(() => {
+            this.load();
 
-        this.data[messageId] = entry;
+            this.data[messageId] = entry;
 
-        // 上限保护：超过 200 条时删除最旧的
-        const keys = Object.keys(this.data).filter((key) => key !== '__meta__');
-        if (keys.length > 200) {
-            const sorted = keys.sort((a, b) => (this.data[a].created_at || 0) - (this.data[b].created_at || 0));
-            const removeCount = keys.length - 200;
-            for (let i = 0; i < removeCount; i++) {
-                delete this.data[sorted[i]];
+            // 上限保护：超过 200 条时删除最旧的
+            const keys = Object.keys(this.data).filter((key) => key !== '__meta__');
+            if (keys.length > 200) {
+                const sorted = keys.sort((a, b) => (this.data[a].created_at || 0) - (this.data[b].created_at || 0));
+                const removeCount = keys.length - 200;
+                for (let i = 0; i < removeCount; i++) {
+                    delete this.data[sorted[i]];
+                }
             }
-        }
 
-        this.save();
+            this.save();
+        });
     }
 
     /**
@@ -82,9 +123,11 @@ class SessionState {
      * Removes a notification entry and persists the change.
      */
     removeNotification(messageId) {
-        this.load();
-        delete this.data[messageId];
-        this.save();
+        this._withLock(() => {
+            this.load();
+            delete this.data[messageId];
+            this.save();
+        });
     }
 
     /**
@@ -92,9 +135,12 @@ class SessionState {
      */
     setLastInteractedDevice(ptsDevice) {
         if (!ptsDevice) return;
-        this.load();
-        this.data['__meta__'] = { lastInteractedDevice: ptsDevice, updated_at: Date.now() };
-        this.save();
+        this._withLock(() => {
+            this.load();
+            // 合并而非覆盖 __meta__，避免冲掉 autoApproveDevices 等同级字段
+            this.data['__meta__'] = { ...(this.data['__meta__'] || {}), lastInteractedDevice: ptsDevice, updated_at: Date.now() };
+            this.save();
+        });
     }
 
     /**
@@ -156,23 +202,25 @@ class SessionState {
             const hours = parseFloat(process.env.NOTIFICATION_EXPIRE_HOURS) || 12;
             maxAgeMs = hours * 3600000;
         }
-        this.load();
+        this._withLock(() => {
+            this.load();
 
-        const now = Date.now();
-        let changed = false;
+            const now = Date.now();
+            let changed = false;
 
-        for (const [key, entry] of Object.entries(this.data)) {
-            if (key === '__meta__') continue;
-            const createdAt = entry.created_at || 0;
-            if (now - createdAt > maxAgeMs) {
-                delete this.data[key];
-                changed = true;
+            for (const [key, entry] of Object.entries(this.data)) {
+                if (key === '__meta__') continue;
+                const createdAt = entry.created_at || 0;
+                if (now - createdAt > maxAgeMs) {
+                    delete this.data[key];
+                    changed = true;
+                }
             }
-        }
 
-        if (changed) {
-            this.save();
-        }
+            if (changed) {
+                this.save();
+            }
+        });
     }
 }
 
