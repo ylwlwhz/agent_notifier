@@ -13,7 +13,10 @@ require('../lib/env-config');
 const fs = require('fs');
 const { spawnSync } = require('child_process');
 
-const { RL_HOST, RL_PROJ, RL_BASE, RL_DEST, RL_NAME, RL_CHAT_ID, RL_BIN, RL_ENV, RL_FLAGS } = process.env;
+const { RL_HOST, RL_PROJ, RL_BASE, RL_DEST, RL_NAME, RL_CHAT_ID, RL_BIN, RL_ENV, RL_FLAGS, RL_PROXY } = process.env;
+
+// claude（本地跑、Bash 转远程）仍需境外代理访问 Anthropic API → 启动前 source 代理脚本
+const PROXY_PREFIX = RL_PROXY ? `source ${RL_PROXY} && ` : '';
 
 // 没有 ~/.mutagen.yml / yq 时的兜底排除集，避免把巨大无用目录 rsync 过来
 const DEFAULT_EXCLUDES = ['.git', 'node_modules', '__pycache__', '.venv', 'venv', '.mypy_cache', '.cache'];
@@ -83,8 +86,9 @@ async function main() {
         return;
     }
     // 本地 tmux 跑 claude-remote-shell：编辑本地镜像，Bash 工具命令重定向到远程 host
+    try { require('./launcher').ensureTrusted(RL_DEST); } catch {} // 跳过 trust this folder 弹窗
     const tmux = spawnSync('tmux', ['new-session', '-d', '-s', RL_NAME, '-c', RL_DEST,
-        `exec env ${RL_ENV} claude-remote-shell ${RL_HOST}:${RL_BASE}/${RL_PROJ} ${RL_BIN} ${RL_FLAGS}`],
+        `${PROXY_PREFIX}exec env ${RL_ENV} claude-remote-shell ${RL_HOST}:${RL_BASE}/${RL_PROJ} ${RL_BIN} ${RL_FLAGS}`],
         { encoding: 'utf8' });
     if (tmux.status !== 0) {
         await notify(`❌ tmux 启动失败：${(tmux.stderr || '').trim()}`, 'red');

@@ -157,6 +157,21 @@ class FeishuListener {
             return;
         }
 
+        // /new 卡片入口：任意卡片输入框输入 `/new [host]` → 弹启动菜单。
+        // 走可靠的 card.action.trigger 通道，绕开飞书消息事件(im.message.receive_v1)的权限限制。
+        if (action.tag === 'input') {
+            const m = /^\/new(?:\s+(\S+))?$/i.exec((action.input_value || '').trim());
+            if (m) {
+                const chatId = data?.context?.open_chat_id || await this.resolveChatId();
+                if (!chatId) return { toast: { type: 'error', content: '无法确定会话，请重试' } };
+                const host = m[1];
+                if (!host) { await this.sendLaunchMenu(chatId, 'local'); return '已弹出启动菜单'; }
+                if (launcher.REMOTE_HOSTS.includes(host)) { await this.sendLaunchMenu(chatId, 'remote', host); return '已弹出启动菜单'; }
+                await this.sendText(chatId, `未知主机「${host}」。可用：${launcher.REMOTE_HOSTS.join(' ')}`);
+                return '未知主机';
+            }
+        }
+
         // Look up the pending notification
         const notification = this.state.getNotification(session_state_key);
         if (!notification) {
@@ -526,7 +541,7 @@ class FeishuListener {
         await this.sendCardJson(chatId, card2({
             template: 'green', title: `已启动 · ${label}`,
             elements: [
-                { tag: 'markdown', content: '在下方直接发指令给它（首条指令请稍候新会话就绪）' },
+                { tag: 'markdown', content: '在下方直接发指令给它（首条指令请稍候新会话就绪）；输入 `/new` 可再建一个会话' },
                 inputEl(stateKey, '给会话发指令...'),
                 escFooterRow(stateKey, `tmux:${name}`),
             ],
@@ -544,6 +559,14 @@ class FeishuListener {
                 data: { receive_id: chatId, msg_type: msgType, content },
             });
         } catch (err) { console.error('[feishu-listener] 发送失败:', err.message); }
+    }
+
+    /** 兜底取 chatId：卡片回调 context 未带 open_chat_id 时，取机器人所在第一个会话 */
+    async resolveChatId() {
+        try {
+            const r = await this.client.im.chat.list({ params: { page_size: 5 } });
+            return (r?.data?.items || [])[0]?.chat_id || null;
+        } catch { return null; }
     }
 
     checkHealth() {

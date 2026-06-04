@@ -27,6 +27,37 @@ const WORK_DIR = process.env.CLAUDE_WORK_DIR || `${HOME}/ClaudeWork`;
 const LAUNCH_ENV = 'ENABLE_PROMPT_CACHING_1H=1';
 const LAUNCH_FLAGS = '--permission-mode bypassPermissions';
 
+// claude 需境外代理访问 Anthropic API：启动前 source 代理脚本（默认 ~/proxy_local.sh）
+const PROXY_SCRIPT = process.env.CLAUDE_PROXY_SCRIPT || `${HOME}/proxy_local.sh`;
+
+/** 代理前缀：脚本存在才加 `source <script> &&`，否则空串 */
+function proxyPrefix() {
+    return fs.existsSync(PROXY_SCRIPT) ? `source ${PROXY_SCRIPT} && ` : '';
+}
+
+/**
+ * 预置目录信任，跳过 claude 首次进入未信任目录的 "trust this folder" 弹窗
+ * （两种权限 flag 都不跳过该弹窗，只能靠 ~/.claude.json 里 hasTrustDialogAccepted）。
+ * 仅在该目录尚未信任时写一次（原子 rename）；配置缺失/损坏则不动，避免误伤。
+ */
+function ensureTrusted(dir) {
+    const cfgPath = `${HOME}/.claude.json`;
+    try {
+        let cfg;
+        try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')); } catch { return; }
+        if (!cfg.projects || typeof cfg.projects !== 'object') cfg.projects = {};
+        const cur = cfg.projects[dir];
+        if (cur && cur.hasTrustDialogAccepted === true) return; // 已信任，免写
+        cfg.projects[dir] = {
+            allowedTools: [], ...(cur || {}),
+            hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true,
+        };
+        const tmp = `${cfgPath}.launcher.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(cfg, null, 2));
+        fs.renameSync(tmp, cfgPath);
+    } catch {}
+}
+
 // 项目名安全白名单：进 tmux/ssh/rsync 命令前过滤，杜绝注入与空格破句
 const SAFE_NAME = /^[\w.-]+$/;
 
@@ -62,8 +93,9 @@ function launchLocal(projName) {
     const dir = path.join(CODE_DIR, projName);
     if (!fs.existsSync(dir)) return { error: `目录不存在: ${dir}` };
     const name = sessionName(projName);
+    ensureTrusted(dir); // 跳过 trust this folder 弹窗
     const r = spawnSync('tmux', ['new-session', '-d', '-s', name, '-c', dir,
-        `exec env ${LAUNCH_ENV} ${CLAUDE_BIN} ${LAUNCH_FLAGS}`], { encoding: 'utf8' });
+        `${proxyPrefix()}exec env ${LAUNCH_ENV} ${CLAUDE_BIN} ${LAUNCH_FLAGS}`], { encoding: 'utf8' });
     if (r.status !== 0) return { error: (r.stderr || r.error?.message || 'tmux 启动失败').trim() };
     return { name, dir };
 }
@@ -78,6 +110,7 @@ function launchRemote(host, proj, chatId) {
             ...process.env,
             RL_HOST: host, RL_PROJ: proj, RL_BASE: REMOTE_BASE, RL_DEST: dest, RL_NAME: name,
             RL_CHAT_ID: chatId || '', RL_BIN: CLAUDE_BIN, RL_ENV: LAUNCH_ENV, RL_FLAGS: LAUNCH_FLAGS,
+            RL_PROXY: fs.existsSync(PROXY_SCRIPT) ? PROXY_SCRIPT : '',
         },
         detached: true, stdio: 'ignore',
     });
@@ -87,5 +120,5 @@ function launchRemote(host, proj, chatId) {
 
 module.exports = {
     REMOTE_HOSTS, CODE_DIR, REMOTE_BASE, LAUNCH_ENV, LAUNCH_FLAGS,
-    listLocalProjects, listRemoteProjects, launchLocal, launchRemote,
+    listLocalProjects, listRemoteProjects, launchLocal, launchRemote, ensureTrusted,
 };
