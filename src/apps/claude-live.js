@@ -171,38 +171,33 @@ function reconstructSegments(transcriptPath) {
     return { turnTs, segments };
 }
 
-/** 一个 turn 的所有「文字段 + 其工具」合并渲染成一张执行摘要卡（B 方案：每 turn 一张，
- *  turn 内靠 patch 静默更新；每段保留「文字面板 + 其工具表」结构，段间 hr 分隔） */
-function buildTurnCard(segments, projectName, capture, ptsDevice) {
+/** 单个「文字段 + 其工具」渲染成一张执行摘要卡 */
+function buildSegmentCard(seg, projectName, capture, ptsDevice) {
+    const rows = seg.tools.map(e => {
+        let cmd = '';
+        if (capture.tools && e.input) cmd = e.tool === 'Bash' ? '`' + e.input.split('\n')[0] + '`' : e.input.replace(/^(写入|编辑) /, '');
+        const res = capture.results && e.result ? e.result.split('\n')[0].trim() : '';
+        return { tool: [{ text: `${e.icon} ${e.tool}`, color: TOOL_COLOR[e.tool] || 'cyan' }], cmd: cmd || '—', res: res || '—' };
+    });
     const elements = [];
-    let totalSteps = 0;
-    segments.forEach((seg, idx) => {
-        totalSteps += seg.tools.length;
-        if (capture.output && seg.text) {
-            elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: `❯ ${termLabel(ptsDevice) || 'Claude'}` } }, elements: [{ tag: 'markdown', content: seg.text }] });
-        }
-        const rows = seg.tools.map(e => {
-            let cmd = '';
-            if (capture.tools && e.input) cmd = e.tool === 'Bash' ? '`' + e.input.split('\n')[0] + '`' : e.input.replace(/^(写入|编辑) /, '');
-            const res = capture.results && e.result ? e.result.split('\n')[0].trim() : '';
-            return { tool: [{ text: `${e.icon} ${e.tool}`, color: TOOL_COLOR[e.tool] || 'cyan' }], cmd: cmd || '—', res: res || '—' };
-        });
-        elements.push({
-            tag: 'table', element_id: `exec_steps_${idx}`, page_size: 10, row_height: 'low', row_max_height: '300px',
-            header_style: { text_align: 'left', background_style: 'grey', bold: true },
-            columns: [
-                { name: 'tool', display_name: '工具',       data_type: 'options', width: '100px', vertical_align: 'top' },
-                { name: 'cmd',  display_name: '命令 / 文件', data_type: 'lark_md', width: '60%',   vertical_align: 'top' },
-                { name: 'res',  display_name: '结果',       data_type: 'text',    width: 'auto',  vertical_align: 'top' },
-            ],
-            rows,
-        });
-        if (idx < segments.length - 1) elements.push({ tag: 'hr' });
+    if (capture.output && seg.text) {
+        elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: `❯ ${termLabel(ptsDevice) || 'Claude'}` } }, elements: [{ tag: 'markdown', content: seg.text }] });
+        elements.push({ tag: 'hr' });
+    }
+    elements.push({
+        tag: 'table', element_id: 'exec_steps', page_size: 10, row_height: 'low', row_max_height: '300px',
+        header_style: { text_align: 'left', background_style: 'grey', bold: true },
+        columns: [
+            { name: 'tool', display_name: '工具',       data_type: 'options', width: '100px', vertical_align: 'top' },
+            { name: 'cmd',  display_name: '命令 / 文件', data_type: 'lark_md', width: '60%',   vertical_align: 'top' },
+            { name: 'res',  display_name: '结果',       data_type: 'text',    width: 'auto',  vertical_align: 'top' },
+        ],
+        rows,
     });
     return card2({
         template: 'blue',
         title: '执行摘要',
-        tags: [{ text: `${totalSteps} 步`, color: 'blue' }],
+        tags: [{ text: `${seg.tools.length} 步`, color: 'blue' }],
         elements,
     });
 }
@@ -316,28 +311,28 @@ async function flushBuffer(bufferPath) {
     const withTools = segments.filter(s => s.tools.length > 0); // 纯文字尾段交给绿色 Stop 卡，不在此重复
     if (!withTools.length) return;
 
-    // B 方案：整个 turn 共用一张卡。本 turn 首次 flush（无 message_id）→ create（通知一次）；
-    // 同 turn 后续 flush（新增段/工具）→ patch 同一张卡（静默，不再通知）；跨 turn（turnTs 变）→ 新卡。
-    const sameTurn = existing && existing.turnTs === turnTs;
-    const card = buildTurnCard(withTools, projectName, capture, ptsDevice);
-    const sig = hashStr(JSON.stringify(card.body.elements));
-    let messageId = sameTurn ? existing.messageId : null;
-
-    if (messageId) {
-        if (existing.sig !== sig) { // 内容变了才 patch
+    // 跨 turn（turnTs 变）重置卡片索引；同 turn 内按段索引：内容变才 patch、新段 create（触发通知）
+    const cards = existing && existing.turnTs === turnTs ? (existing.cards || []) : [];
+    for (let i = 0; i < withTools.length; i++) {
+        const card = buildSegmentCard(withTools[i], projectName, capture, ptsDevice);
+        const sig = hashStr(JSON.stringify(card.body.elements));
+        const slot = cards[i];
+        if (slot?.message_id) {
+            if (slot.sig === sig) continue; // 内容没变 → 免一次 patch
             try {
-                await client.im.message.patch({ path: { message_id: messageId }, data: { content: JSON.stringify(card) } });
+                await client.im.message.patch({ path: { message_id: slot.message_id }, data: { content: JSON.stringify(card) } });
+                slot.sig = sig;
             } catch (err) { console.error('[live/flush] patch 失败:', err.message); }
+        } else {
+            try {
+                const r = await client.im.message.create({
+                    params: { receive_id_type: 'chat_id' },
+                    data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
+                });
+                if (r?.data?.message_id) cards[i] = { message_id: r.data.message_id, sig };
+            } catch (err) { console.error('[live/flush] 发送失败:', err.message); }
         }
-    } else {
-        try {
-            const r = await client.im.message.create({
-                params: { receive_id_type: 'chat_id' },
-                data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-            });
-            messageId = r?.data?.message_id || null;
-        } catch (err) { console.error('[live/flush] 发送失败:', err.message); }
     }
-    sessionState.data[stateKey] = { turnTs, messageId, sig, created_at: Date.now() };
+    sessionState.data[stateKey] = { turnTs, cards, created_at: Date.now() };
     sessionState.save();
 }
