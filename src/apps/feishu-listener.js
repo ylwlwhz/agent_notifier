@@ -73,7 +73,7 @@ class FeishuListener {
                         interruptBeforeText: entry.notification_type === 'live_summary' && response.responseType === 'text',
                     });
                 }
-                this.state.setLastInteractedDevice(entry.pts_device);
+                await this.state.setLastInteractedDeviceAsync(entry.pts_device);
                 console.log(
                     `[feishu-listener] codex 已注入 ${response.responseType} 到 ${entry.pts_device}:`,
                     response.values || response.value || ''
@@ -132,7 +132,7 @@ class FeishuListener {
 
         // Periodic cleanup of expired notifications
         this.cleanupInterval = setInterval(() => {
-            this.state.cleanExpired();
+            this.state.cleanExpiredAsync().catch(() => {});
         }, 60000);
     }
 
@@ -273,7 +273,7 @@ class FeishuListener {
                 await injectKeys(notification.pts_device, '1'); // 确认 "Submit answers / Cancel"
                 injected.push("'1'(confirm)");
                 console.log(`[feishu-listener] 注入序列:`, injected.join(' → '), '| device:', notification.pts_device);
-                this.state.setLastInteractedDevice(notification.pts_device);
+                await this.state.setLastInteractedDeviceAsync(notification.pts_device);
             } catch (err) {
                 console.error('[feishu-listener] 多选注入失败:', err.message);
                 return '注入失败';
@@ -282,7 +282,7 @@ class FeishuListener {
             const opts = notification._ms_options || [];
             const labels = [...selectedSet].sort((a, b) => a - b)
                 .map(i => i < total ? (opts[i] || `选项${i + 1}`) : `Other: ${otherText || ''}`);
-            this.state.removeNotification(session_state_key);
+            await this.state.removeNotificationAsync(session_state_key);
             return `已提交: ${labels.join(', ')}`;
         }
 
@@ -305,16 +305,17 @@ class FeishuListener {
                     await injectText(notification.pts_device, action.input_value);
                     console.log(`[feishu-listener] 已注入文字到 ${notification.pts_device}: ${action.input_value.substring(0, 50)}`);
                 }
-                this.state.setLastInteractedDevice(notification.pts_device);
+                await this.state.setLastInteractedDeviceAsync(notification.pts_device);
             } catch (err) {
                 console.error('[feishu-listener] 文字注入失败:', err.message);
                 return;
             }
             // 多问题模式：删除并发送下一题；普通卡片：保留以支持多次回复
             if (notification._all_questions) {
-                this.state.removeNotification(session_state_key);
+                await this.state.removeNotificationAsync(session_state_key);
                 // 末题经输入框回答：injectText 已带 \r 自动提交，sendNextQuestion 不再补 1
-                this.sendNextQuestion(notification, session_state_key, true).catch(err =>
+                // await 确保下一题卡片发出后再回 toast（state 写已异步，不阻塞事件循环）
+                await this.sendNextQuestion(notification, session_state_key, true).catch(err =>
                     console.error('[feishu-listener] 发送下一题失败:', err.message));
             }
             return '已发送';
@@ -332,20 +333,22 @@ class FeishuListener {
         try {
             await injectKeys(notification.pts_device, responseEntry.keys);
             console.log(`[feishu-listener] 已注入按键到 ${notification.pts_device}: ${responseEntry.label}`);
-            this.state.setLastInteractedDevice(notification.pts_device);
+            await this.state.setLastInteractedDeviceAsync(notification.pts_device);
         } catch (err) {
             console.error('[feishu-listener] 注入失败:', err.message);
             return;
         }
 
-        // bypass 按钮：注入后还要把终端加入 autoApproveDevices
+        // bypass 按钮：注入后还要把终端加入 autoApproveDevices（异步锁，避免冻结事件循环）
         if (action_type === 'bypass' && notification.pts_device) {
-            this.state.load();
-            const meta = this.state.data['__meta__'] || {};
-            const devices = new Set(meta.autoApproveDevices || []);
-            devices.add(notification.pts_device);
-            this.state.data['__meta__'] = { ...meta, autoApproveDevices: [...devices], updated_at: Date.now() };
-            this.state.save();
+            await this.state._withLockAsync(() => {
+                this.state.load();
+                const meta = this.state.data['__meta__'] || {};
+                const devices = new Set(meta.autoApproveDevices || []);
+                devices.add(notification.pts_device);
+                this.state.data['__meta__'] = { ...meta, autoApproveDevices: [...devices], updated_at: Date.now() };
+                this.state.save();
+            });
             console.log(`[feishu-listener] 已开启全局允许: ${notification.pts_device}`);
             return '已开启全局允许，后续权限自动批准';
         }
@@ -355,13 +358,12 @@ class FeishuListener {
         // 普通卡片按钮（esc/allow 等）：保留以支持多次操作
         if (action_type === 'opt_other') {
             notification._other_clicked = true;
-            this.state.load();
-            this.state.data[session_state_key] = notification;
-            this.state.save();
+            await this.state.addNotificationAsync(session_state_key, notification);
         } else if (notification._all_questions) {
-            this.state.removeNotification(session_state_key);
+            await this.state.removeNotificationAsync(session_state_key);
             // 末题经按钮回答：只注入了选项的 \r，需 sendNextQuestion 末分支补 1 确认提交
-            this.sendNextQuestion(notification, session_state_key, false).catch(err =>
+            // await 确保下一题/完成卡片发出后再回 toast（state 写已异步，不阻塞事件循环）
+            await this.sendNextQuestion(notification, session_state_key, false).catch(err =>
                 console.error('[feishu-listener] 发送下一题失败:', err.message));
         }
         return responseEntry.label;
@@ -398,7 +400,7 @@ class FeishuListener {
             qResponses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
 
             // 保存 state（沿用多问题元数据）
-            this.state.addNotification(newStateKey, {
+            await this.state.addNotificationAsync(newStateKey, {
                 session_id: notification.session_id,
                 notification_type: notification.notification_type,
                 pts_device: notification.pts_device,
@@ -502,7 +504,7 @@ class FeishuListener {
         if (!projects.length) return this.sendText(chatId, mode === 'local' ? `${launcher.CODE_DIR} 下没有项目目录` : `${host} 上没有项目`);
 
         const stateKey = `feishu_launch_${Date.now()}`;
-        this.state.addNotification(stateKey, { created_at: Date.now(), _launch: true, mode, host: host || null, chat_id: chatId, items: projects });
+        await this.state.addNotificationAsync(stateKey, { created_at: Date.now(), _launch: true, mode, host: host || null, chat_id: chatId, items: projects });
 
         const els = [{ tag: 'markdown', content: question }];
         projects.forEach((p, i) => els.push({
@@ -518,7 +520,7 @@ class FeishuListener {
         if (i < 0) return;
         const proj = (notification.items || [])[i];
         if (!proj) return '选项无效';
-        this.state.removeNotification(stateKey);
+        await this.state.removeNotificationAsync(stateKey);
 
         if (notification.mode === 'local') {
             const r = launcher.launchLocal(proj);
@@ -534,7 +536,7 @@ class FeishuListener {
     /** 发带输入框的卡、绑定新会话终端——新启动会话靠它发第一条指令 */
     async sendLaunchedCard(chatId, label, name) {
         const stateKey = `feishu_${name}_${Date.now()}`;
-        this.state.addNotification(stateKey, {
+        await this.state.addNotificationAsync(stateKey, {
             session_id: name, notification_type: 'launched', pts_device: `tmux:${name}`, created_at: Date.now(),
             responses: { esc: { keys: '\x1b', label: 'Esc' }, interrupt: { keys: '\x1b', label: '⛔ 中断' } },
         });
