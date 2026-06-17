@@ -106,6 +106,10 @@ test('多问题流程：Q1→Q2→完成，末题按钮注入序列为 \\r \\r 1
     const sent = [];
     const listener = makeFakeListener(FL, state, sent);
 
+    // 注入现已放后台执行（handleCardAction 即时返回"已收到"），并会额外发一张"已收到"卡。
+    // 断言前先 await 后台注入；断言卡片内容时滤掉"已收到"卡，只看问题/完成卡。
+    const cards = () => sent.filter(c => c.header?.title?.content !== '已收到');
+
     // ── 准备 Q1 的 session state（与 sendMultiQuestionFirstCard 存储格式一致）
     const stateKey = 'test-multi-q-state';
     const ptsDevice = 'fifo:/tmp/test-multi-q';
@@ -160,14 +164,19 @@ test('多问题流程：Q1→Q2→完成，末题按钮注入序列为 \\r \\r 1
     };
 
     await FL.prototype.handleCardAction.call(listener, q1ActionData);
+    await listener._lastInjection; // 等后台注入 + 发下一题完成
 
     // 断言：注入了 '\r'（Q1 第一个选项 = 0 次 ↓ + Enter）
     assert.equal(injections.length, 1, '点击 Q1 opt_0 后应有且仅有 1 次注入');
     assert.equal(injections[0], '\r', 'Q1 opt_0 应注入纯 \\r，不含 \\n');
 
-    // 断言：发送了 Q2 卡片
-    assert.equal(sent.length, 1, '应已向飞书发送 Q2 卡片');
-    const q2Card = sent[0];
+    // 断言：发送了一张"已收到"卡 + Q2 卡片
+    assert.ok(
+        sent.some(c => c.header?.title?.content === '已收到'),
+        '点击 Q1 选项后应已发送"已收到"卡'
+    );
+    assert.equal(cards().length, 1, '除"已收到"卡外，应已向飞书发送 Q2 卡片');
+    const q2Card = cards()[0];
     assert.equal(q2Card.header?.template, 'orange', 'Q2 卡片应使用 orange 模板');
 
     // ── 找到 Q2 的 stateKey（格式：<baseKey>_q1）
@@ -204,10 +213,7 @@ test('多问题流程：Q1→Q2→完成，末题按钮注入序列为 \\r \\r 1
     };
 
     await FL.prototype.handleCardAction.call(listener, q2ActionData);
-
-    // 末题确认（sleep + 注入 '1'）是 sendNextQuestion 内 fire-and-forget，等其完成。
-    // 测试中 listener.sleep 被替换为立即 resolve，故极短等待即可。
-    await new Promise(r => setTimeout(r, 50));
+    await listener._lastInjection; // 后台注入 + 末题确认 + 发完成卡均在此链内完成
 
     // 断言：第二次注入了 '\r'（Q2 第一个选项）
     assert.equal(injections[1], '\r', 'Q2 opt_0 应注入纯 \\r');
@@ -217,8 +223,8 @@ test('多问题流程：Q1→Q2→完成，末题按钮注入序列为 \\r \\r 1
     assert.equal(injections[2], '1', '末题按钮回答应补注入 1 确认 "Submit answers"');
 
     // 断言：发送了"完成卡片"（green 模板，标题含"全部已回答"）
-    assert.equal(sent.length, 2, '应已向飞书发送完成卡片');
-    const doneCard = sent[1];
+    assert.equal(cards().length, 2, '除"已收到"卡外，应已发送 Q2 卡 + 完成卡');
+    const doneCard = cards()[1];
     assert.equal(doneCard.header?.template, 'green', '完成卡片应使用 green 模板');
     assert.ok(
         doneCard.header?.title?.content?.includes('全部已回答'),
@@ -306,6 +312,7 @@ test('多问题流程：Q2 responses 使用 \\r 而非 \\n（sendNextQuestion �
     await FL.prototype.handleCardAction.call(listener, {
         action: { tag: 'button', value: { action_type: 'opt_0', session_state_key: stateKey } },
     });
+    await listener._lastInjection; // 注入与「发下一题、写 Q2 state」均在后台链内
 
     const q2StateKey = `${stateKey}_q1`;
     const q2Notif = state.getNotification(q2StateKey);

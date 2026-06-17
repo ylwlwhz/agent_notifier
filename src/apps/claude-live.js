@@ -128,8 +128,6 @@ function formatToolResult(toolResponse) {
 
 // ─── 执行摘要卡构建 ───────────────────────────────────────────────────────────
 
-const TOOL_COLOR = { Bash: 'blue', Edit: 'green', Write: 'orange', Read: 'grey', NotebookEdit: 'purple' };
-
 function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h; }
 
 /** 从 transcript 重建当前 turn（到上一条 user prompt 为止）的「文字段 → 其后工具」结构。
@@ -171,33 +169,59 @@ function reconstructSegments(transcriptPath) {
     return { turnTs, segments };
 }
 
-/** 单个「文字段 + 其工具」渲染成一张执行摘要卡 */
-function buildSegmentCard(seg, projectName, capture, ptsDevice) {
-    const rows = seg.tools.map(e => {
-        let cmd = '';
-        if (capture.tools && e.input) cmd = e.tool === 'Bash' ? '`' + e.input.split('\n')[0] + '`' : e.input.replace(/^(写入|编辑) /, '');
-        const res = capture.results && e.result ? e.result.split('\n')[0].trim() : '';
-        return { tool: [{ text: `${e.icon} ${e.tool}`, color: TOOL_COLOR[e.tool] || 'cyan' }], cmd: cmd || '—', res: res || '—' };
-    });
+/** 命令/文件的单行预览（标题用，防止多行在表格里相互重叠）：取首行并截断 */
+function toolPreview(e) {
+    const src = e.tool === 'Bash' ? (e.input || '') : (e.input || '').replace(/^(写入|编辑) /, '');
+    const firstLine = src.split('\n')[0];
+    return firstLine.length > 56 ? firstLine.slice(0, 56) + '…' : firstLine;
+}
+
+/** 单个工具 → 一张可折叠面板：标题=图标+工具+命令首行预览（单行），点击展开看完整命令 + 完整结果。
+ *  改用折叠面板而非表格，彻底避开飞书表格多行单元格相互重叠的问题。 */
+function buildToolPanel(e, capture) {
+    const preview = capture.tools ? toolPreview(e) : '';
+    const title = `${e.icon} ${e.tool}` + (preview ? `  ${preview}` : '');
+    const body = [];
+    if (capture.tools && e.input) {
+        if (e.tool === 'Bash') {
+            body.push({ tag: 'markdown', content: '```bash\n' + e.input + '\n```' });
+        } else {
+            body.push({ tag: 'markdown', content: '`' + e.input.replace(/^(写入|编辑) /, '') + '`' });
+        }
+    }
+    if (capture.results && e.result) {
+        body.push({ tag: 'markdown', content: '**结果**\n```\n' + e.result.trim() + '\n```' });
+    }
+    if (!body.length) body.push({ tag: 'markdown', content: '_（无更多详情）_' });
+    return {
+        tag: 'collapsible_panel',
+        expanded: false, // 默认折叠 —— 点击后查看详细内容
+        header: { title: { tag: 'plain_text', content: title } },
+        elements: body,
+    };
+}
+
+/** 把本轮「所有」文字段 + 其工具渲染成「一张」执行摘要卡（多段合并，不再每段一卡）。
+ *  mergeInfo（可选）：合并进「已收到」卡时传入 { detail }，顶部保留回执、卡变绿、标题改「已收到 · 执行摘要」，
+ *  避免 patch 直接把已收到卡内容覆盖没。 */
+function buildSummaryCard(segments, projectName, capture, ptsDevice, mergeInfo = null) {
     const elements = [];
-    if (capture.output && seg.text) {
-        elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: `❯ ${termLabel(ptsDevice) || 'Claude'}` } }, elements: [{ tag: 'markdown', content: seg.text }] });
+    if (mergeInfo) {
+        if (mergeInfo.detail) elements.push({ tag: 'markdown', content: `✅ **已收到** · ${mergeInfo.detail}` });
         elements.push({ tag: 'hr' });
     }
-    elements.push({
-        tag: 'table', element_id: 'exec_steps', page_size: 10, row_height: 'low', row_max_height: '300px',
-        header_style: { text_align: 'left', background_style: 'grey', bold: true },
-        columns: [
-            { name: 'tool', display_name: '工具',       data_type: 'options', width: '100px', vertical_align: 'top' },
-            { name: 'cmd',  display_name: '命令 / 文件', data_type: 'lark_md', width: '60%',   vertical_align: 'top' },
-            { name: 'res',  display_name: '结果',       data_type: 'text',    width: 'auto',  vertical_align: 'top' },
-        ],
-        rows,
+    let totalSteps = 0;
+    segments.forEach((seg, idx) => {
+        if (idx > 0) elements.push({ tag: 'hr' }); // 段间分隔
+        if (capture.output && seg.text) {
+            elements.push({ tag: 'collapsible_panel', expanded: seg.text.length < 200, header: { title: { tag: 'plain_text', content: `❯ ${termLabel(ptsDevice) || 'Claude'}` } }, elements: [{ tag: 'markdown', content: seg.text }] });
+        }
+        seg.tools.forEach(e => { elements.push(buildToolPanel(e, capture)); totalSteps++; });
     });
     return card2({
-        template: 'blue',
-        title: '执行摘要',
-        tags: [{ text: `${seg.tools.length} 步`, color: 'blue' }],
+        template: 'blue', // 与执行摘要同色；合并卡靠标题/顶部回执区分，不再用绿色
+        title: mergeInfo ? '已收到 · 执行摘要' : '执行摘要',
+        tags: [{ text: `${totalSteps} 步`, color: 'blue' }],
         elements,
     });
 }
@@ -311,28 +335,61 @@ async function flushBuffer(bufferPath) {
     const withTools = segments.filter(s => s.tools.length > 0); // 纯文字尾段交给绿色 Stop 卡，不在此重复
     if (!withTools.length) return;
 
-    // 跨 turn（turnTs 变）重置卡片索引；同 turn 内按段索引：内容变才 patch、新段 create（触发通知）
-    const cards = existing && existing.turnTs === turnTs ? (existing.cards || []) : [];
-    for (let i = 0; i < withTools.length; i++) {
-        const card = buildSegmentCard(withTools[i], projectName, capture, ptsDevice);
-        const sig = hashStr(JSON.stringify(card.body.elements));
-        const slot = cards[i];
-        if (slot?.message_id) {
-            if (slot.sig === sig) continue; // 内容没变 → 免一次 patch
-            try {
-                await client.im.message.patch({ path: { message_id: slot.message_id }, data: { content: JSON.stringify(card) } });
-                slot.sig = sig;
-            } catch (err) { console.error('[live/flush] patch 失败:', err.message); }
-        } else {
-            try {
-                const r = await client.im.message.create({
-                    params: { receive_id_type: 'chat_id' },
-                    data: { receive_id: chatId, msg_type: 'interactive', content: JSON.stringify(card) },
-                });
-                if (r?.data?.message_id) cards[i] = { message_id: r.data.message_id, sig };
-            } catch (err) { console.error('[live/flush] 发送失败:', err.message); }
-        }
+    // 本轮若由飞书回复触发，listener 已写下「已收到」卡 message_id；新轮且够新 → 整张执行摘要卡 patch 进那张卡
+    // （合并、保留回执），只用一次。无该键（终端直接发起）则照旧新发，零影响。
+    const RECEIVED_TTL_MS = parseInt(process.env.FEISHU_RECEIVED_MERGE_TTL_MS || '600000', 10);
+    const receivedKey = 'received_msg_' + sessionKey;
+    const received = sessionState.data[receivedKey];
+    const sameTurn = !!(existing && existing.turnTs === turnTs);
+
+    // 合并回执：本轮卡已并过则沿用（existing.merge）；新轮且有够新 received 则并入「已收到」卡
+    let mergeInfo = sameTurn ? (existing.merge || null) : null;
+    let mergeIntoReceived = false;
+    if (!sameTurn && !mergeInfo && received?.message_id && Date.now() - (received.created_at || 0) < RECEIVED_TTL_MS) {
+        mergeInfo = { detail: received.detail || '' };
+        mergeIntoReceived = true;
     }
-    sessionState.data[stateKey] = { turnTs, cards, created_at: Date.now() };
-    sessionState.save();
+
+    // 整轮所有段渲染成「一张」卡
+    const card = buildSummaryCard(withTools, projectName, capture, ptsDevice, mergeInfo);
+    const sig = hashStr(JSON.stringify(card.body.elements));
+    const content = JSON.stringify(card);
+
+    const sendCard = async (c) => {
+        const r = await client.im.message.create({
+            params: { receive_id_type: 'chat_id' },
+            data: { receive_id: chatId, msg_type: 'interactive', content: c },
+        });
+        return r?.data?.message_id || null;
+    };
+
+    let messageId = sameTurn ? existing.message_id : null;
+    let storedSig = sameTurn ? existing.sig : null;
+
+    if (messageId) {
+        // 同轮：复用同一张卡，内容变才 patch（新段只追加进同卡，不再每段新发）
+        if (storedSig !== sig) {
+            try { await client.im.message.patch({ path: { message_id: messageId }, data: { content } }); storedSig = sig; }
+            catch (err) { console.error('[live/flush] patch 失败:', err.message); }
+        }
+    } else if (mergeIntoReceived) {
+        // 新轮：patch 进「已收到」卡（内容已含回执），失败则退回新发
+        try { await client.im.message.patch({ path: { message_id: received.message_id }, data: { content } }); messageId = received.message_id; storedSig = sig; }
+        catch (err) {
+            console.error('[live/flush] 合并到「已收到」卡失败，改为新发:', err.message);
+            try { messageId = await sendCard(content); storedSig = sig; } catch (err2) { console.error('[live/flush] 发送失败:', err2.message); }
+        }
+        delete sessionState.data[receivedKey]; // 消费掉，结尾 save 持久化（避免跨轮误用）
+    } else {
+        // 新轮、无「已收到」卡：照旧新发一张
+        try { messageId = await sendCard(content); storedSig = sig; } catch (err) { console.error('[live/flush] 发送失败:', err.message); }
+    }
+
+    if (messageId) {
+        sessionState.data[stateKey] = { turnTs, message_id: messageId, sig: storedSig, merge: mergeInfo, created_at: Date.now() };
+        sessionState.save();
+    }
 }
+
+// 仅供单测使用：导出纯函数，不影响上面的 main()/flushBuffer() 运行入口
+module.exports = { buildSummaryCard, buildToolPanel, formatToolInput, formatToolResult, reconstructSegments };

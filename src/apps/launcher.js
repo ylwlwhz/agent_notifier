@@ -18,8 +18,6 @@ const { spawnSync, spawn } = require('child_process');
 const HOME = process.env.HOME;
 const CLAUDE_BIN = process.env.CLAUDE_BIN || `${HOME}/.local/bin/claude`;
 const CODE_DIR = process.env.CLAUDE_LAUNCH_DIR || `${HOME}/coderepo`;
-const REMOTE_HOSTS = (process.env.CLAUDE_REMOTE_HOSTS
-    || 'devcloud cscg102 cscg103 cscg104 cscg106 fitten fitten2 hpc').split(/\s+/).filter(Boolean);
 const REMOTE_BASE = process.env.CLAUDE_REMOTE_BASE || '~/coderepo';
 const WORK_DIR = process.env.CLAUDE_WORK_DIR || `${HOME}/ClaudeWork`;
 
@@ -60,6 +58,42 @@ function ensureTrusted(dir) {
 
 // 项目名安全白名单：进 tmux/ssh/rsync 命令前过滤，杜绝注入与空格破句
 const SAFE_NAME = /^[\w.-]+$/;
+// 绝对路径安全集（手动输入路径用）：仅放行路径字符，禁 shell 元字符/空格，防注入
+const PATH_SAFE = /^[\w./~-]+$/;
+// 主机名安全集：白名单已取消（任意主机放行），仅保留注入防护，允许 user@host.name-1
+const HOST_SAFE = /^[\w.@-]+$/;
+
+/** 主机名是否安全（仅注入防护，不再做白名单校验） */
+function isHostSafe(host) { return !!host && HOST_SAFE.test(host); }
+
+/** "项目名 或 绝对路径" → 本地目录。返回 { dir, label } 或 { error } */
+function resolveLocalDir(projOrPath) {
+    let dir, label;
+    if (projOrPath.startsWith('/') || projOrPath.startsWith('~')) {
+        if (!PATH_SAFE.test(projOrPath)) return { error: `非法路径: ${projOrPath}` };
+        dir = projOrPath.startsWith('~') ? path.join(HOME, projOrPath.slice(1)) : projOrPath;
+        label = path.basename(dir.replace(/\/+$/, '')) || dir;
+    } else {
+        if (!SAFE_NAME.test(projOrPath)) return { error: `非法项目名: ${projOrPath}` };
+        dir = path.join(CODE_DIR, projOrPath);
+        label = projOrPath;
+    }
+    if (!fs.existsSync(dir)) return { error: `目录不存在: ${dir}` };
+    return { dir, label };
+}
+
+/** "项目名 或 远程绝对路径" → { base, name }（base/name 拼回远程路径）或 { error } */
+function resolveRemoteProj(projOrPath) {
+    const clean = projOrPath.replace(/\/+$/, '');
+    if (clean.startsWith('/') || clean.startsWith('~')) {
+        if (!PATH_SAFE.test(clean)) return { error: `非法路径: ${projOrPath}` };
+        const name = path.posix.basename(clean);
+        if (!name) return { error: `路径无效: ${projOrPath}` };
+        return { base: path.posix.dirname(clean), name };
+    }
+    if (!SAFE_NAME.test(clean)) return { error: `非法项目名: ${projOrPath}` };
+    return { base: REMOTE_BASE, name: clean };
+}
 
 /** tmux 会话名：claude-<sanitized>-<时分秒> */
 function sessionName(label) {
@@ -87,38 +121,42 @@ function listRemoteProjects(host) {
     return { projects };
 }
 
-/** 本地启动：tmux detached 跑 claude。返回 { name, dir } 或 { error } */
-function launchLocal(projName) {
-    if (!SAFE_NAME.test(projName)) return { error: `非法项目名: ${projName}` };
-    const dir = path.join(CODE_DIR, projName);
-    if (!fs.existsSync(dir)) return { error: `目录不存在: ${dir}` };
-    const name = sessionName(projName);
+/** 本地启动：tmux detached 跑 claude。projOrPath = 菜单项目名 或 绝对路径。返回 { name, dir, label } 或 { error } */
+function launchLocal(projOrPath) {
+    const r0 = resolveLocalDir(projOrPath);
+    if (r0.error) return r0;
+    const { dir, label } = r0;
+    const name = sessionName(label);
     ensureTrusted(dir); // 跳过 trust this folder 弹窗
     const r = spawnSync('tmux', ['new-session', '-d', '-s', name, '-c', dir,
         `${proxyPrefix()}exec env ${LAUNCH_ENV} ${CLAUDE_BIN} ${LAUNCH_FLAGS}`], { encoding: 'utf8' });
     if (r.status !== 0) return { error: (r.stderr || r.error?.message || 'tmux 启动失败').trim() };
-    return { name, dir };
+    return { name, dir, label };
 }
 
-/** 远程启动：rsync 耗时，异步交给 detached 子进程，本函数立即返回 { name, dest } 或 { error } */
-function launchRemote(host, proj, chatId) {
-    if (!REMOTE_HOSTS.includes(host) || !SAFE_NAME.test(proj)) return { error: `非法主机或项目: ${host} ${proj}` };
-    const dest = path.join(WORK_DIR, host, proj);
-    const name = sessionName(`${host}-${proj}`);
+/** 远程启动：rsync 耗时，异步交给 detached 子进程，本函数立即返回 { name, dest, label } 或 { error }。
+ *  projOrPath = 菜单项目名（拼到 REMOTE_BASE 下）或 远程绝对路径（直接用）。白名单已取消，仅注入防护。 */
+function launchRemote(host, projOrPath, chatId) {
+    if (!isHostSafe(host)) return { error: `非法主机名: ${host}` };
+    const rp = resolveRemoteProj(projOrPath);
+    if (rp.error) return rp;
+    const { base, name: projName } = rp;
+    const dest = path.join(WORK_DIR, host.replace(/[^\w.-]/g, '_'), projName);
+    const name = sessionName(`${host}-${projName}`);
     const child = spawn(process.execPath, [path.join(__dirname, 'remote-launch.js')], {
         env: {
             ...process.env,
-            RL_HOST: host, RL_PROJ: proj, RL_BASE: REMOTE_BASE, RL_DEST: dest, RL_NAME: name,
+            RL_HOST: host, RL_PROJ: projName, RL_BASE: base, RL_DEST: dest, RL_NAME: name,
             RL_CHAT_ID: chatId || '', RL_BIN: CLAUDE_BIN, RL_ENV: LAUNCH_ENV, RL_FLAGS: LAUNCH_FLAGS,
             RL_PROXY: fs.existsSync(PROXY_SCRIPT) ? PROXY_SCRIPT : '',
         },
         detached: true, stdio: 'ignore',
     });
     child.unref();
-    return { name, dest };
+    return { name, dest, label: projName };
 }
 
 module.exports = {
-    REMOTE_HOSTS, CODE_DIR, REMOTE_BASE, LAUNCH_ENV, LAUNCH_FLAGS,
+    CODE_DIR, REMOTE_BASE, LAUNCH_ENV, LAUNCH_FLAGS, isHostSafe,
     listLocalProjects, listRemoteProjects, launchLocal, launchRemote, ensureTrusted,
 };

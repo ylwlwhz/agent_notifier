@@ -16,7 +16,7 @@ const { injectKeys, injectText } = require('../lib/terminal-inject');
 const { createFeishuClient } = require('../channels/feishu/feishu-client');
 const { createFeishuInteractionHandler } = require('../channels/feishu/feishu-interaction-handler');
 const { createCodexInputBridge } = require('../adapters/codex/cli-input-bridge');
-const { selectCard, card2, inputEl, escFooterRow } = require('../lib/card');
+const { selectCard, card2, inputEl, escFooterRow, footer } = require('../lib/card');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const launcher = require('./launcher');
 
@@ -144,8 +144,13 @@ class FeishuListener {
      */
     async handleCardAction(data) {
         const action = data?.action;
-        console.log('[feishu-listener] 收到回调 action_type:', action?.value?.action_type, 'key:', action?.value?.session_state_key?.substring(0, 20));
-        console.log('[feishu-listener] data keys:', Object.keys(data || {}));
+        // 观测：打印 input_value/event_id/create_time，用于区分「飞书去重没发」与「事件丢失」
+        console.log('[feishu-listener] 收到回调',
+            'type:', action?.value?.action_type,
+            'tag:', action?.tag,
+            'input:', JSON.stringify((action?.input_value || '').slice(0, 30)),
+            'key:', action?.value?.session_state_key?.substring(0, 24),
+            'event_id:', data?.event_id, 'create_time:', data?.create_time);
         if (!action || !action.value) {
             console.log('[feishu-listener] 收到无效的卡片回调');
             return;
@@ -166,9 +171,9 @@ class FeishuListener {
                 if (!chatId) return { toast: { type: 'error', content: '无法确定会话，请重试' } };
                 const host = m[1];
                 if (!host) { await this.sendLaunchMenu(chatId, 'local'); return '已弹出启动菜单'; }
-                if (launcher.REMOTE_HOSTS.includes(host)) { await this.sendLaunchMenu(chatId, 'remote', host); return '已弹出启动菜单'; }
-                await this.sendText(chatId, `未知主机「${host}」。可用：${launcher.REMOTE_HOSTS.join(' ')}`);
-                return '未知主机';
+                if (!launcher.isHostSafe(host)) { await this.sendText(chatId, `非法主机名「${host}」`); return '非法主机'; }
+                await this.sendLaunchMenu(chatId, 'remote', host);
+                return '已弹出启动菜单';
             }
         }
 
@@ -183,7 +188,7 @@ class FeishuListener {
 
         // 启动菜单：无 pts_device，须在终端检查前分流
         if (notification._launch) {
-            return this.handleLaunch(notification, action_type, session_state_key);
+            return this.handleLaunch(notification, action_type, session_state_key, action);
         }
 
         // Check terminal target
@@ -192,6 +197,94 @@ class FeishuListener {
             return { toast: { type: 'error', content: '未找到目标终端，无法注入' } };
         }
 
+        // 用户在卡片上选择选项 / 给出对话回复：立即另发一张"已收到"卡，
+        // 终端注入放后台执行、回调即时返回（注入失败仅记日志，不阻塞反馈）。
+        if (this._shouldAck(action, action_type, notification)) {
+            // fire-and-forget：内部含 chatId 兜底解析（回调多数不带 open_chat_id），不阻塞回调返回
+            this._sendReceivedCard(data, notification, action, action_type)
+                .catch(err => console.error('[feishu-listener] "已收到"卡发送失败:', err.message));
+            // 暴露在实例上，便于测试确定性地 await 后台注入完成（生产侧不读取）
+            this._lastInjection = this._injectInteraction(data, notification, action, action_type, session_state_key)
+                .catch(err => console.error('[feishu-listener] 后台注入失败:', err.message));
+            return '已收到';
+        }
+        // 控制类（中断 / Esc / 开启全局允许 / 仅展开 Other 输入框）：保持同步，原样返回各自反馈
+        return this._injectInteraction(data, notification, action, action_type, session_state_key);
+    }
+
+    /** 是否属于「用户给出回复 / 选择选项」从而需要发"已收到"卡。
+     *  排除：中断 / Esc / 开启全局允许 / 仅展开 Other 输入框；空提交不算回复。 */
+    _shouldAck(action, action_type, notification) {
+        if (['interrupt', 'esc', 'bypass', 'opt_other'].includes(action_type)) return false;
+        if (action_type === 'submit_multi') return !!(action?.input_value && action.input_value.trim());
+        if (action?.tag === 'input' && action.input_value) return true; // 文本 / 对话回复
+        if (notification.host === 'codex') return true;                  // codex 各类回复
+        if (action_type && notification.responses?.[action_type]) return true; // 选项 / 答复按钮
+        return false;
+    }
+
+    /** 回显用户所选 / 所答的 markdown 文案（"已收到"卡与执行摘要合并回执共用） */
+    _receivedDetail(notification, action, action_type) {
+        if (action?.tag === 'input' && action.input_value) {
+            const txt = String(action.input_value).trim();
+            const shown = txt.length > 300 ? txt.slice(0, 300) + '…' : txt;
+            return action_type === 'submit_multi' ? `多选提交：\`${shown}\`` : `**回复：** ${shown}`;
+        }
+        const label = notification.responses?.[action_type]?.label;
+        return label ? `**已选择：** ${label}` : '';
+    }
+
+    /** "已收到"卡：带宿主身份 + 回显用户所选 / 所答 + 终端 id（绿色 yes 图标表示已接收） */
+    buildReceivedCard(notification, action, action_type) {
+        const isCodex = notification.host === 'codex';
+        const detail = this._receivedDetail(notification, action, action_type);
+        const elements = [];
+        if (detail) elements.push({ tag: 'markdown', content: detail });
+        const f = footer('', notification.pts_device);
+        if (f) elements.push(f);
+        if (!elements.length) elements.push({ tag: 'markdown', content: '已收到你的操作' });
+        return card2({
+            template: 'blue', // 与执行摘要同色（用户要求）
+            title: '已收到',
+            tags: [{ text: isCodex ? 'Codex' : 'Claude', color: isCodex ? 'purple' : 'blue' }],
+            elements,
+        });
+    }
+
+    /** 发送"已收到"卡：chatId 兜底解析。卡片回调多数不带 context.open_chat_id（见 resolveChatId 注释），
+     *  单选/多选通知也没存 _chat_id，故必须回退到 FEISHU_CHAT_ID / 列群，否则 send() 因 chatId 为空静默不发。 */
+    async _sendReceivedCard(data, notification, action, action_type) {
+        const chatId = data?.context?.open_chat_id
+            || notification._chat_id
+            || process.env.FEISHU_CHAT_ID
+            || await this.resolveChatId();
+        if (!chatId) { console.error('[feishu-listener] "已收到"卡未发送：无法确定 chatId'); return; }
+        const resp = await this.sendCardJson(chatId, this.buildReceivedCard(notification, action, action_type));
+
+        // 仅 Claude：把"已收到"卡 message_id 记到 received_msg_<sessionKey>，供 claude-live 执行摘要 patch 合并。
+        // sessionKey 对齐 claude-live：去掉 claude_ 前缀再 slice(0,8)。codex 走另一套 live 流程，不在此合并。
+        const messageId = resp?.data?.message_id;
+        const sessionKey = this._claudeSessionKey(notification);
+        if (messageId && sessionKey) {
+            const detail = this._receivedDetail(notification, action, action_type);
+            await this.state._withLockAsync(() => {
+                this.state.load();
+                this.state.data['received_msg_' + sessionKey] = { message_id: messageId, created_at: Date.now(), detail };
+                this.state.save();
+            }).catch(err => console.error('[feishu-listener] 记录 received_msg 失败:', err.message));
+        }
+    }
+
+    /** Claude 通知 → claude-live 用的 sessionKey（去 claude_ 前缀后 slice(0,8)）；codex/缺失返回 '' */
+    _claudeSessionKey(notification) {
+        if (notification?.host === 'codex') return '';
+        const raw = String(notification?.session_id || '').replace(/^claude_/, '');
+        return raw ? raw.slice(0, 8) : '';
+    }
+
+    /** 实际把交互注入到终端（codex / 多选 / 文本 / 按钮），返回 toast 文案。
+     *  由 handleCardAction 视情况后台执行或同步等待。 */
+    async _injectInteraction(data, notification, action, action_type, session_state_key) {
         if (notification.host === 'codex') {
             try {
                 const response = await this.unifiedInteractionHandler.handleCardAction(data);
@@ -483,25 +576,23 @@ class FeishuListener {
         const host = parts[1];
         console.log(`[feishu-listener] 启动命令: claude ${host || '(本地)'}`);
         if (!host) return this.sendLaunchMenu(chatId, 'local');
-        if (launcher.REMOTE_HOSTS.includes(host)) return this.sendLaunchMenu(chatId, 'remote', host);
-        await this.sendText(chatId, `未知主机「${host}」。可用：${launcher.REMOTE_HOSTS.join(' ')}\n或直接发 claude 启动本地`);
+        if (!launcher.isHostSafe(host)) { await this.sendText(chatId, `非法主机名「${host}」`); return; }
+        return this.sendLaunchMenu(chatId, 'remote', host);
     }
 
-    /** 发项目选择菜单卡（竖排按钮，opt_N → items[N]） */
+    /** 发项目选择菜单卡（竖排按钮 opt_N → items[N]；末尾输入框支持手动输入绝对路径） */
     async sendLaunchMenu(chatId, mode, host) {
-        let projects, title, question;
+        let projects = [], title, question;
         if (mode === 'local') {
             projects = launcher.listLocalProjects();
             title = `启动 claude · 本地 ${launcher.CODE_DIR}`;
-            question = '选择项目目录：';
+            question = projects.length ? '选择项目目录，或在下方手动输入绝对路径：' : `${launcher.CODE_DIR} 下没有项目，可手动输入绝对路径：`;
         } else {
             const r = launcher.listRemoteProjects(host);
-            if (r.error) return this.sendText(chatId, `❌ 列 ${host} 项目失败：${r.error}`);
-            projects = r.projects;
             title = `启动 claude · ${host}`;
-            question = `选择 ${host} 上的项目：`;
+            if (r.error) question = `⚠️ 列 ${host} 项目失败：${r.error}\n可手动输入该机上的绝对路径：`;
+            else { projects = r.projects; question = projects.length ? `选择 ${host} 上的项目，或手动输入绝对路径：` : `${host} 上没列到项目，可手动输入绝对路径：`; }
         }
-        if (!projects.length) return this.sendText(chatId, mode === 'local' ? `${launcher.CODE_DIR} 下没有项目目录` : `${host} 上没有项目`);
 
         const stateKey = `feishu_launch_${Date.now()}`;
         await this.state.addNotificationAsync(stateKey, { created_at: Date.now(), _launch: true, mode, host: host || null, chat_id: chatId, items: projects });
@@ -511,25 +602,41 @@ class FeishuListener {
             tag: 'button', text: { tag: 'plain_text', content: p }, type: i === 0 ? 'primary' : 'default',
             value: { action_type: `opt_${i}`, session_state_key: stateKey },
         }));
+        // 手动路径输入框：列表外的目录靠它（action_type=launch_path，handleLaunch 识别）
+        const ph = mode === 'local' ? '手动输入绝对路径，回车启动…' : `输入 ${host} 上的绝对路径，回车启动…`;
+        els.push(inputEl(stateKey, ph, 'launch_path', 'launch_path'));
         await this.sendCardJson(chatId, card2({ template: 'blue', title, elements: els }));
     }
 
-    /** 启动菜单回调：opt_N → 本地立即启动 / 远程异步拉取 */
-    async handleLaunch(notification, action_type, stateKey) {
+    /** 启动菜单回调：opt_N 选列表项 / launch_path 输入框手动路径 → 本地立即启动 或 远程异步拉取 */
+    async handleLaunch(notification, action_type, stateKey, action) {
+        // 手动输入绝对路径（输入框提交）
+        if (action?.tag === 'input' || action_type === 'launch_path') {
+            const p = (action?.input_value || '').trim();
+            if (!p) return { toast: { type: 'warning', content: '请输入路径' } };
+            await this.state.removeNotificationAsync(stateKey);
+            return this._doLaunch(notification, p);
+        }
+        // 列表按钮
         const i = this.menuIndex(action_type);
         if (i < 0) return;
         const proj = (notification.items || [])[i];
         if (!proj) return '选项无效';
         await this.state.removeNotificationAsync(stateKey);
+        return this._doLaunch(notification, proj);
+    }
 
+    /** 本地/远程统一启动（projOrPath = 菜单项目名 或 绝对路径） */
+    async _doLaunch(notification, projOrPath) {
         if (notification.mode === 'local') {
-            const r = launcher.launchLocal(proj);
+            const r = launcher.launchLocal(projOrPath);
             if (r.error) { await this.sendText(notification.chat_id, `❌ 启动失败：${r.error}`); return '启动失败'; }
-            await this.sendLaunchedCard(notification.chat_id, proj, r.name);
+            await this.sendLaunchedCard(notification.chat_id, r.label || projOrPath, r.name);
             return '已启动';
         }
-        launcher.launchRemote(notification.host, proj, notification.chat_id);
-        await this.sendText(notification.chat_id, `⏬ 正在从 ${notification.host} 拉取 ${proj}…\n完成后自动启动并通知`);
+        const r = launcher.launchRemote(notification.host, projOrPath, notification.chat_id);
+        if (r.error) { await this.sendText(notification.chat_id, `❌ 启动失败：${r.error}`); return '启动失败'; }
+        await this.sendText(notification.chat_id, `⏬ 正在从 ${notification.host} 拉取 ${projOrPath}…\n完成后自动启动并通知`);
         return '正在拉取';
     }
 
@@ -554,13 +661,13 @@ class FeishuListener {
     sendText(chatId, text) { return this.send(chatId, 'text', JSON.stringify({ text })); }
     sendCardJson(chatId, card) { return this.send(chatId, 'interactive', JSON.stringify(card)); }
     async send(chatId, msgType, content) {
-        if (!chatId) return;
+        if (!chatId) return null;
         try {
-            await this.client.im.message.create({
+            return await this.client.im.message.create({
                 params: { receive_id_type: 'chat_id' },
                 data: { receive_id: chatId, msg_type: msgType, content },
             });
-        } catch (err) { console.error('[feishu-listener] 发送失败:', err.message); }
+        } catch (err) { console.error('[feishu-listener] 发送失败:', err.message); return null; }
     }
 
     /** 兜底取 chatId：卡片回调 context 未带 open_chat_id 时，取机器人所在第一个会话 */

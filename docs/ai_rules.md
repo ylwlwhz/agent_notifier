@@ -83,6 +83,27 @@ Codex 的实时摘要规则：
 - 文本输入、审批、单选、多选都要能通过飞书回流到终端
 - 回流逻辑由 `src/channels/feishu/feishu-interaction-handler.js` 和 `src/adapters/codex/cli-input-bridge.js` 统一处理
 
+### 回流「已收到」反馈
+
+- 用户在卡片上选择选项 / 给出对话回复后，`feishu-listener` 须**立即另发一张「已收到」卡**（绿色、带宿主标签、回显所选/所答），不替换原卡。
+- 终端注入放**后台执行**（`this._lastInjection`），`handleCardAction` 即时返回，慢路径（多选）不阻塞反馈；注入失败仅记日志。
+- 控制类操作不发「已收到」卡：中断 / Esc / 开启全局允许 / 仅展开 Other 输入框；空提交不算回复。
+- 是否发卡由 `_shouldAck` 判定，卡片由 `buildReceivedCard` 构建（均在 `src/apps/feishu-listener.js`）。
+
+#### 执行摘要卡形态（claude-live）
+
+- **一轮一张卡**：本轮所有「文字段 + 其工具」合并进**同一张**执行摘要卡（`buildSummaryCard`），不再每段一张。同轮内新增工具/段落 → patch 同一张卡；跨轮（`turnTs` 变）才新发。
+- **命令/结果点击查看**：每个工具是一张**默认折叠**的 `collapsible_panel`（`buildToolPanel`），标题只放「图标+工具+命令首行预览（截断单行）」，展开后才看完整命令（Bash 用代码块）+ 完整结果。弃用 `table`——飞书表格多行单元格会相互重叠。
+
+#### 执行摘要并入「已收到」卡（仅 Claude）
+
+- listener 发「已收到」卡后，把 `message_id` 写入 `received_msg_<sessionKey>`（`sessionKey` = 通知 `session_id` 去 `claude_` 前缀再 `slice(0,8)`，对齐 `claude-live` 的键），带 `created_at` 与回执文案 `detail`（`_receivedDetail` 生成，与「已收到」卡共用）。
+- `claude-live` flush 时，若**新轮**且存在够新的 `received_msg_<sessionKey>`（TTL 默认 10 分钟，`FEISHU_RECEIVED_MERGE_TTL_MS` 可调），把**整张执行摘要卡 patch 进那张「已收到」卡**（合并），并消费该键（只并一次）；patch 失败则退回新发。
+- 合并卡须**保留回执**（顶部 `✅ 已收到 · <detail>`、绿色、标题「已收到 · 执行摘要」），不能用普通蓝卡直接 patch 把回执覆盖没。`live_msg` 状态记 `merge`，本轮后续更新仍用合并版式。
+- 终端直接发起的轮次没有该键，零影响：执行摘要照旧新发自己的卡。
+- 跨进程共享 `src/session-state.json`；`received_msg_*` 与 `live_msg_*` 同形，不参与终端路由（`getLatestNotification` 无外部调用）。
+- Codex 走另一套 `codex-live` 流程，不在此合并。
+
 ## 7. 测试与验证
 
 运行全量测试（推荐 bun，Node 16 不支持 `--test`）：

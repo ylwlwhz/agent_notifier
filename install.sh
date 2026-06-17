@@ -457,6 +457,16 @@ WantedBy=default.target
 SVCEOF
             systemctl --user daemon-reload
             systemctl --user enable "$SYSTEMD_SERVICE"
+            # 开启 lingering：让 user@.service 开机即起、登出也不停，listener 才能真正常驻
+            # （否则 --user 服务仅在该用户有登录会话时运行，服务器重启或登出后不会自动拉起）
+            if ! loginctl show-user "$USER" 2>/dev/null | grep -q 'Linger=yes'; then
+                if loginctl enable-linger "$USER" 2>/dev/null; then
+                    success "已开启 lingering（开机自启、登出不停）"
+                else
+                    warn "无法自动开启 lingering，请手动执行: sudo loginctl enable-linger $USER"
+                    warn "（否则服务器重启或你登出后，listener 不会自动运行）"
+                fi
+            fi
             systemctl --user restart "$SYSTEMD_SERVICE"
             sleep 1
             if systemctl --user is-active "$SYSTEMD_SERVICE" &>/dev/null; then
