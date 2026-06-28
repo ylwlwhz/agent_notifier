@@ -11,7 +11,8 @@ const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
 
 const TMP_DIR = '/tmp';
-const OUTPUT_PREFIX = 'claude-pty-output-';
+const OUTPUT_PREFIX = 'codex-pty-output-';
+const OUTPUT_FILE_RE = /^codex-pty-output-(\d+)$/;
 const POLL_MS = 1500;
 
 /** 根据 pts 编号解析注入目标：FIFO 优先，否则使用裸 pts */
@@ -28,6 +29,12 @@ function extractPtsNum(ptsDevice) {
     const m = String(ptsDevice).match(/pts(\d+)$/);
     return m ? m[1] : String(ptsDevice).replace('/dev/pts/', '');
 }
+
+function extractOutputPtsNum(filePath) {
+    const m = path.basename(String(filePath)).match(OUTPUT_FILE_RE);
+    return m ? m[1] : null;
+}
+
 const WATCHER_BUFFER_MAX_CHARS = 100000;
 const COMPLETION_HINT_PATTERN = /\b(done|completed|complete|finished|resolved|successful(?:ly)?|all set|updated \d+ files?)\b|(?:已完成|完成了|处理完成|任务完成|执行完成|搞定)/i;
 
@@ -287,7 +294,6 @@ class CodexWatcher {
         this.signatures = new Map();
         this.timer = null;
         this._finalCardTimers = new Map();
-        this._codexPtsSet = new Set();
     }
 
     async ensureChatId() {
@@ -297,30 +303,6 @@ class CodexWatcher {
             larkClient: this.client.client,
         });
         return this.chatId;
-    }
-
-    /** 扫描 /proc 找出运行 codex 的 pts 编号 */
-    _refreshCodexPtsSet() {
-        try {
-            const { execSync } = require('child_process');
-            const out = execSync("ps -eo tty,args 2>/dev/null | grep -i codex | grep -v grep | grep -v watcher | grep -v 'vscode'", {
-                encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'],
-            });
-            const pts = new Set();
-            for (const line of out.trim().split('\n')) {
-                const m = line.match(/pts\/(\d+)/);
-                if (m) pts.add(m[1]);
-            }
-            this._codexPtsSet = pts;
-        } catch {
-            // 静默失败，保留上次结果
-        }
-    }
-
-    /** 判断 pts 设备是否属于 Codex */
-    _isCodexPts(ptsDevice) {
-        const num = extractPtsNum(ptsDevice);
-        return this._codexPtsSet.has(num);
     }
 
     /**
@@ -373,10 +355,6 @@ class CodexWatcher {
             throw new Error('需要 FEISHU_CHAT_ID（或应用可读取到至少一个 chat）');
         }
 
-        // 检测当前哪些 pts 运行着 Codex 进程
-        this._refreshCodexPtsSet();
-        this._codexPtsRefreshTimer = setInterval(() => this._refreshCodexPtsSet(), 30000);
-
         this.timer = setInterval(() => {
             this.tick().catch((err) => {
                 console.error('[codex-watcher] tick 失败:', err.message);
@@ -402,9 +380,8 @@ class CodexWatcher {
     }
 
     async processOutputFile(filePath) {
-        // 只处理 Codex 进程所在的 pts，跳过 Claude 终端
-        const ptsMatch = filePath.match(/claude-pty-output-(\d+)$/);
-        if (ptsMatch && !this._codexPtsSet.has(ptsMatch[1])) return;
+        const ptsNum = extractOutputPtsNum(filePath);
+        if (!ptsNum) return;
 
         const stat = fs.statSync(filePath);
         const isFirstSeen = !this.offsets.has(filePath);
@@ -437,7 +414,6 @@ class CodexWatcher {
             ? chunkText.slice(-WATCHER_BUFFER_MAX_CHARS)
             : (old + chunkText).slice(-WATCHER_BUFFER_MAX_CHARS);
         this.buffers.set(filePath, merged);
-        const ptsNum = filePath.replace(/^.*claude-pty-output-/, '');
         const ptsDevice = resolvePtsTarget(ptsNum);
 
         // Prefer parsing the latest incremental chunk, then fall back to merged buffer.
@@ -587,5 +563,6 @@ module.exports = {
     buildLiveSummaryCard,
     buildCard,
     computeReadPlan,
+    extractOutputPtsNum,
     isCompletionLikeSummary,
 };

@@ -8,6 +8,7 @@ const {
   buildExecutionSummaryCard,
   buildLiveSummaryCard,
   computeReadPlan,
+  extractOutputPtsNum,
   isCompletionLikeSummary,
 } = require('../../src/apps/codex-watcher');
 
@@ -32,6 +33,12 @@ test('computeReadPlan: first-seen file should not replay existing history', () =
   });
 
   assert.deepEqual(plan, { shouldRead: false, readOffset: 0, readLength: 0 });
+});
+
+test('extractOutputPtsNum: only accepts codex PTY output files', () => {
+  assert.equal(extractOutputPtsNum('/tmp/codex-pty-output-61'), '61');
+  assert.equal(extractOutputPtsNum('/tmp/claude-pty-output-61'), null);
+  assert.equal(extractOutputPtsNum('/tmp/codex-live-61.jsonl'), null);
 });
 
 test('isCompletionLikeSummary: detects completion phrases', () => {

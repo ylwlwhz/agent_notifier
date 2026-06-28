@@ -3,14 +3,14 @@
 PTY 代理中继 — 非 tmux 环境下的终端输入注入方案
 
 在终端中运行，创建 pty 代理层：
-    终端 <-> pty-relay (持有 master fd) <-> shell / Claude Code
+    终端 <-> pty-relay (持有 master fd) <-> shell / CLI
                  ^
            FIFO 接收注入
 
 用法:
     python3 pty-relay.py                  # 默认启动 $SHELL (zsh)
     python3 pty-relay.py bash             # 指定 shell
-    python3 pty-relay.py claude --flags   # 直接运行指定命令
+    python3 pty-relay.py my-cli --flags   # 直接运行指定命令
 
 原理:
     1. 创建 pty pair (master/slave)
@@ -39,6 +39,23 @@ import json
 import re
 import subprocess
 from collections import deque
+
+DEFAULT_OUTPUT_PREFIX = 'claude-pty-output'
+CODEX_OUTPUT_PREFIX = 'codex-pty-output'
+OUTPUT_PREFIX_ENV = 'PTY_RELAY_OUTPUT_PREFIX'
+
+
+def resolve_output_prefix(argv):
+    explicit = os.environ.get(OUTPUT_PREFIX_ENV)
+    if explicit:
+        return explicit
+
+    if len(argv) > 1:
+        target = os.path.basename(argv[1]).lower()
+        if target.startswith('codex'):
+            return CODEX_OUTPUT_PREFIX
+
+    return DEFAULT_OUTPUT_PREFIX
 
 
 # ── 加载 .env ──────────────────────────────────────────────
@@ -176,7 +193,8 @@ def main():
     signal.signal(signal.SIGWINCH, on_winch)
 
     # 终端输出缓冲文件（供 hook-handler 读取权限选项）
-    output_log_path = f'/tmp/claude-pty-output-{pts_num}'
+    output_prefix = resolve_output_prefix(sys.argv)
+    output_log_path = f'/tmp/{output_prefix}-{pts_num}'
     output_buffer = bytearray()
     OUTPUT_BUFFER_MAX = 4096
     assistant_feed_path = '/tmp/codex-assistant-feed.jsonl'

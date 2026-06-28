@@ -282,7 +282,7 @@ AGENT_FUNCS=$(cat <<'EOF'
 # ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──
 claude() {
     if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(unset -f claude 2>/dev/null; command -v claude)" "$@"
+        PTY_RELAY_OUTPUT_PREFIX=claude-pty-output PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(unset -f claude 2>/dev/null; command -v claude)" "$@"
     else
         command claude "$@"
     fi
@@ -293,7 +293,7 @@ claude() {
 codex() {
     local CODEX_BIN_CMD="${CODEX_BIN:-codex}"
     if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(unset -f codex 2>/dev/null; command -v "$CODEX_BIN_CMD")" "$@"
+        PTY_RELAY_OUTPUT_PREFIX=codex-pty-output PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(unset -f codex 2>/dev/null; command -v "$CODEX_BIN_CMD")" "$@"
     else
         command "$CODEX_BIN_CMD" "$@"
     fi
@@ -304,12 +304,28 @@ EOF
 AGENT_FUNCS=${AGENT_FUNCS//__INSTALL_DIR__/$INSTALL_DIR}
 
 # 幂等注入到指定 rc 文件
+sed_inplace() {
+    if sed --version >/dev/null 2>&1; then
+        sed -i "$@"
+    else
+        sed -i '' "$@"
+    fi
+}
+
+remove_existing_agent_funcs() {
+    local rc_file="$1"
+    sed_inplace '/^# ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Claude Code PTY 中继结束 ──$/d' "$rc_file"
+    sed_inplace '/^# ── Codex CLI PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Codex CLI PTY 中继结束 ──$/d' "$rc_file"
+}
+
 inject_funcs() {
     local rc_file="$1"
-    if grep -q "Claude Code PTY 中继" "$rc_file" 2>/dev/null && grep -q "Codex CLI PTY 中继" "$rc_file" 2>/dev/null; then
-        success "shell 函数已存在于 ${rc_file}，跳过"
+    touch "$rc_file"
+    if grep -Eq "Claude Code PTY 中继|Codex CLI PTY 中继" "$rc_file" 2>/dev/null; then
+        remove_existing_agent_funcs "$rc_file"
+        printf '\n%s\n' "$AGENT_FUNCS" >> "$rc_file"
+        success "已更新 ${rc_file} 中的 claude()/codex() 函数"
     else
-        touch "$rc_file"
         printf '\n%s\n' "$AGENT_FUNCS" >> "$rc_file"
         success "已将 claude()/codex() 函数注入 ${rc_file}"
     fi
