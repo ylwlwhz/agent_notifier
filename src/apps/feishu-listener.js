@@ -23,6 +23,23 @@ const launcher = require('./launcher');
 const WS_MAX_AGE_MS = parseInt(process.env.FEISHU_WS_MAX_AGE_MIN || '25', 10) * 60_000;
 const HEALTH_CHECK_INTERVAL_MS = 60_000;
 
+// Lark WSClient 用 ws 库建长连接，而 ws 不读 http(s)_proxy 环境变量。
+// 出网必须走代理的机器（如公司内网服务器）需显式把代理 agent 传给 WSClient，
+// 否则 WS 握手直连飞书网关超时。HTTP 发卡走 axios 会自动读 https_proxy，无需处理。
+// 返回 undefined 表示无代理（保持原生直连行为，不影响可直连飞书的环境）。
+function buildProxyAgent() {
+    const proxyUrl = process.env.https_proxy || process.env.HTTPS_PROXY
+        || process.env.http_proxy || process.env.HTTP_PROXY;
+    if (!proxyUrl) return undefined;
+    try {
+        const { HttpsProxyAgent } = require('https-proxy-agent');
+        return new HttpsProxyAgent(proxyUrl);
+    } catch (err) {
+        console.error('[feishu-listener] 构造代理 agent 失败，将尝试直连:', err.message);
+        return undefined;
+    }
+}
+
 class FeishuListener {
     constructor() {
         this.state = new SessionState();
@@ -120,6 +137,7 @@ class FeishuListener {
             appId: this.appId,
             appSecret: this.appSecret,
             loggerLevel: Lark.LoggerLevel.info,
+            agent: buildProxyAgent(),
         });
 
         // Start WebSocket connection
@@ -701,6 +719,7 @@ class FeishuListener {
             appId: this.appId,
             appSecret: this.appSecret,
             loggerLevel: Lark.LoggerLevel.info,
+            agent: buildProxyAgent(),
         });
         this.wsClient.start({ eventDispatcher: this.eventDispatcher });
         this.lastEventTime = Date.now();
