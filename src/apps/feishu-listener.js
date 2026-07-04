@@ -288,11 +288,11 @@ class FeishuListener {
         if (notification.host === 'codex') {
             try {
                 const response = await this.unifiedInteractionHandler.handleCardAction(data);
-                if (!response) return;
+                if (!response) return { toast: { type: 'warning', content: '⚠️ 交互已过期或无法路由' } };
                 return '已发送';
             } catch (err) {
                 console.error('[feishu-listener] codex 回调处理失败:', err.message);
-                return '处理失败';
+                return { toast: { type: 'error', content: '处理失败，请查看 listener 日志' } };
             }
         }
 
@@ -369,7 +369,7 @@ class FeishuListener {
                 await this.state.setLastInteractedDeviceAsync(notification.pts_device);
             } catch (err) {
                 console.error('[feishu-listener] 多选注入失败:', err.message);
-                return '注入失败';
+                return { toast: { type: 'error', content: '注入失败，终端可能已关闭' } };
             }
 
             const opts = notification._ms_options || [];
@@ -400,8 +400,9 @@ class FeishuListener {
                 }
                 await this.state.setLastInteractedDeviceAsync(notification.pts_device);
             } catch (err) {
+                // 诚实反馈：默认 fallback 会弹绿色「已操作」，注入失败必须给红色错误
                 console.error('[feishu-listener] 文字注入失败:', err.message);
-                return;
+                return { toast: { type: 'error', content: '注入失败，终端可能已关闭' } };
             }
             // 多问题模式：删除并发送下一题；普通卡片：保留以支持多次回复
             if (notification._all_questions) {
@@ -420,7 +421,7 @@ class FeishuListener {
         const responseEntry = notification.responses?.[action_type];
         if (!responseEntry) {
             console.log('[feishu-listener] 未知操作:', action_type);
-            return;
+            return { toast: { type: 'warning', content: `⚠️ 未知操作 ${action_type}` } };
         }
 
         try {
@@ -429,7 +430,7 @@ class FeishuListener {
             await this.state.setLastInteractedDeviceAsync(notification.pts_device);
         } catch (err) {
             console.error('[feishu-listener] 注入失败:', err.message);
-            return;
+            return { toast: { type: 'error', content: '注入失败，终端可能已关闭' } };
         }
 
         // bypass 按钮：注入后还要把终端加入 autoApproveDevices（异步锁，避免冻结事件循环）

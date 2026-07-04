@@ -166,19 +166,20 @@ function handleStop(data, getStats) {
     const body = texts.join('\n\n');
 
     // 一个 prompt 内多次 Stop，只发新增前缀差；边界 ts 变了（跑了新工具/新 turn）→ 重置 prev 整段发
+    // 读旧 slot + 写新 slot 在锁内原子完成，避免旧快照整表回写清掉并发进程刚写入的通知
     const sentKey = `__stop_sent_${(data.session_id || '').slice(0, 8)}`;
-    sessionState.load();
-    const slot = sessionState.data[sentKey];
+    let slot;
+    sessionState.mutate((state) => {
+        slot = state[sentKey];
+        state[sentKey] = { body, boundaryTs, created_at: Date.now() };
+    });
     const prev = slot && slot.boundaryTs === boundaryTs ? slot.body : '';
     const delta = body.startsWith(prev) ? body.slice(prev.length).trim() : body;
 
-    const save = () => { sessionState.data[sentKey] = { body, boundaryTs, created_at: Date.now() }; sessionState.save(); };
     if (!delta) {
         if (slot) return null; // 无新增且已发过 → 跳过
-        save();
         return buildCard('Claude 完成', '任务已完成，可以查看执行结果了', 'green', getStats());
     }
-    save();
     const shown = delta.length > STOP_BODY_MAX ? '…（仅显示最新部分）\n\n' + delta.slice(-STOP_BODY_MAX) : delta;
     return buildCard('Claude 完成', shown, 'green', getStats());
 }

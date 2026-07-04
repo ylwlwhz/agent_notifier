@@ -299,39 +299,42 @@ async function flushBuffer(bufferPath) {
         phase: latest.phase || existing?.phase || null,
         inputStateKey: ptsDevice ? inputStateKey : null,
     });
+    // 写回统一走 mutateAsync（锁内 fresh load 只写本键）：网络窗口内旧快照整表 save 会清掉并发新增的通知
     if (!createNew && existing?.message_id) {
         try {
             await client.patchCard({ messageId: existing.message_id, card });
-            sessionState.data[stateKey] = {
-                ...existing,
-                entries: allEntries,
-                assistantKey: latest.assistantKey || existing.assistantKey || '',
-                phase: latest.phase || existing.phase || null,
-                ptsDevice: latest.ptsDevice || existing.ptsDevice || null,
-                turnStartedAt: latest.turnStartedAt || existing.turnStartedAt || null,
-                updated_at: Date.now(),
-                projectName: latest.projectName || existing.projectName || '',
-                inputStateKey,
-            };
-            sessionState.save();
+            await sessionState.mutateAsync((data) => {
+                data[stateKey] = {
+                    ...existing,
+                    entries: allEntries,
+                    assistantKey: latest.assistantKey || existing.assistantKey || '',
+                    phase: latest.phase || existing.phase || null,
+                    ptsDevice: latest.ptsDevice || existing.ptsDevice || null,
+                    turnStartedAt: latest.turnStartedAt || existing.turnStartedAt || null,
+                    updated_at: Date.now(),
+                    projectName: latest.projectName || existing.projectName || '',
+                    inputStateKey,
+                };
+            });
             return;
         } catch {}
     }
 
     const resp = await client.sendCard({ chatId, card });
-    sessionState.data[stateKey] = {
-        message_id: resp?.data?.message_id || null,
-        entries: allEntries,
-        assistantKey: latest.assistantKey || '',
-        phase: latest.phase || null,
-        ptsDevice: latest.ptsDevice || null,
-        turnStartedAt: latest.turnStartedAt || null,
-        created_at: Date.now(),
-        updated_at: Date.now(),
-        projectName: latest.projectName || '',
-        inputStateKey,
-    };
-    sessionState.save();
+    await sessionState.mutateAsync((data) => {
+        data[stateKey] = {
+            message_id: resp?.data?.message_id || null,
+            entries: allEntries,
+            assistantKey: latest.assistantKey || '',
+            phase: latest.phase || null,
+            ptsDevice: latest.ptsDevice || null,
+            turnStartedAt: latest.turnStartedAt || null,
+            created_at: Date.now(),
+            updated_at: Date.now(),
+            projectName: latest.projectName || '',
+            inputStateKey,
+        };
+    });
 }
 
 async function main() {

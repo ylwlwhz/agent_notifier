@@ -154,6 +154,11 @@ tests/
 - 改交互桥时，要覆盖文本、审批、单选、多选
 - 改飞书卡片时，除了单测，还应做真机弹窗验证
 - 终端注入使用 `\r`(CR) 作为 Enter，不用 `\n`(LF) — PTY raw mode 下 LF 不是 Enter
+- `src/session-state.json` 是多进程共享账本：读改写必须走 `SessionState.mutate()/mutateAsync()`
+  （锁内 fresh load、只改自己的键）。**严禁「load 旧快照 → await 网络 → save 整表回写」**——
+  会把网络窗口期内其他进程刚 addNotification 的键清掉，飞书卡片随机变「已失效」。
+  该模式曾同时存在于 claude-live flush / claude-hook Stop 去重 / codex-live / codex-watcher，
+  2026-07-02 全部改为 mutate；回归测试见 `tests/lib/session-state.test.js`。
 
 ## 8. 运行与联调
 

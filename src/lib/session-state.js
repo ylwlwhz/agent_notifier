@@ -130,6 +130,22 @@ class SessionState {
     addNotificationAsync(messageId, entry) { return this._withLockAsync(() => this._doAdd(messageId, entry)); }
 
     /**
+     * 原子读改写：锁内 fresh load → mutator(this.data) → save。
+     * mutator 返回 false 表示放弃保存（数据不变时省一次写盘）。
+     *
+     * 慢操作（网络请求等）必须放在锁外，只把「改自己键」的写回放进 mutator——
+     * 用旧快照整表 save() 会把并发进程刚写入的通知清掉（飞书卡片随机「已失效」的根因）。
+     */
+    _doMutate(mutator) {
+        this.load();
+        const r = mutator(this.data);
+        if (r !== false) this.save();
+        return r;
+    }
+    mutate(mutator) { return this._withLock(() => this._doMutate(mutator)); }
+    mutateAsync(mutator) { return this._withLockAsync(() => this._doMutate(mutator)); }
+
+    /**
      * Returns the notification entry for a given message ID, or null.
      * Always loads fresh data from disk first.
      */
