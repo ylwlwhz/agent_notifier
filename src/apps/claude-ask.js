@@ -11,6 +11,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const Lark = require('@larksuiteoapi/node-sdk');
 const { envConfig } = require('../lib/env-config');
@@ -19,6 +20,7 @@ const { resolvePtsDevice } = require('../lib/terminal-inject');
 const { buildMultiSelectCard, parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
 const { selectCard } = require('../lib/card');
+const { isRelayMode, enqueueRequest } = require('../lib/relay');
 
 // ── Utility functions ─────────────────────────────────────
 
@@ -110,12 +112,17 @@ async function getFeishuAppClient() {
 
 // ── Card senders ──────────────────────────────────────────
 
-/** Case A: single multi-select question */
-async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts) {
+/** Case A: single multi-select question.
+ *  ctx: { state, containerId } — host service passes its own state + the owning
+ *  container id (for docker-exec injection routing); in-container fallback omits
+ *  ctx, defaulting to the module singleton state and no container id. */
+async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts, ctx = {}) {
+    const state = ctx.state || sessionState;
     const notif = {
         session_id: sessionId,
         notification_type: notificationType,
         pts_device: ptsDevice,
+        container_id: ctx.containerId,
         created_at: Date.now(),
         responses: {},
         _multi_select: true,
@@ -141,14 +148,15 @@ async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notif
             },
         });
         notif._message_id = resp?.data?.message_id || null;
-        sessionState.addNotification(stateKey, notif);
+        await state.addNotificationAsync(stateKey, notif);
     } catch (err) {
         console.error('[ask-handler] 发送多选卡片失败:', err.message);
     }
 }
 
 /** Case B: single single-select question */
-async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts) {
+async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts, ctx = {}) {
+    const state = ctx.state || sessionState;
     const card = selectCard({
         title: q.header || '方案选择',
         contextText: q._contextText || '',
@@ -181,10 +189,11 @@ async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, noti
                 content: JSON.stringify(card),
             },
         });
-        sessionState.addNotification(stateKey, {
+        await state.addNotificationAsync(stateKey, {
             session_id: sessionId,
             notification_type: notificationType,
             pts_device: ptsDevice,
+            container_id: ctx.containerId,
             created_at: Date.now(),
             responses,
         });
@@ -194,7 +203,8 @@ async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, noti
 }
 
 /** Case C: multiple questions — send first, store all for listener */
-async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType, noteParts) {
+async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType, noteParts, ctx = {}) {
+    const state = ctx.state || sessionState;
     const q = questions[0];
     const contextText = q._contextText || '';
     const ARROW_DOWN = '\x1b[B';
@@ -209,10 +219,11 @@ async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, s
     qResponses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
 
     // Store all questions for listener
-    sessionState.addNotification(stateKey, {
+    await state.addNotificationAsync(stateKey, {
         session_id: sessionId,
         notification_type: notificationType,
         pts_device: ptsDevice,
+        container_id: ctx.containerId,
         created_at: Date.now(),
         responses: qResponses,
         _all_questions: questions,
@@ -240,6 +251,62 @@ async function sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, s
     }
 }
 
+// ── Request shaping + host-side dispatch ─────────────────
+
+/**
+ * Turn a raw AskUserQuestion hook payload into a self-contained request the host
+ * service can act on without touching the container's filesystem. Everything the
+ * host needs (pts device, container id, transcript-derived context, project name,
+ * state key) is resolved here, in the container, where those live.
+ * Returns null if this isn't an AskUserQuestion we should handle.
+ */
+function buildAskRequestFromHook(data) {
+    const questions = data.tool_input?.questions;
+    if (!Array.isArray(questions) || questions.length === 0) return null;
+    const sessionId = data.session_id || '';
+    return {
+        kind: 'ask',
+        questions,
+        session_id: sessionId,
+        context_text: extractContextText(data.transcript_path || ''),
+        project_name: getProjectName(data.cwd || ''),
+        pts_device: resolvePtsDevice(process.ppid),
+        container_id: process.env.AGENT_NOTIFIER_CONTAINER_ID || os.hostname(),
+        state_key: `feishu_ask_${sessionId.substring(0, 8)}_${Date.now()}`,
+        notification_type: 'AskUserQuestion',
+    };
+}
+
+/**
+ * Build + send the appropriate card(s) for an ask request and store the
+ * notification. Shared by the in-container hook (app+state local) and the host
+ * service (app = host client, ctx.state = host state; req.container_id routes
+ * injection back via docker exec).
+ */
+async function handleAskRequest(app, req, ctx = {}) {
+    const questions = req.questions || [];
+    if (!questions.length) return;
+    questions.forEach(q => { q._contextText = req.context_text || ''; });
+
+    const footerEl = buildCardFooter({
+        host: 'claude',
+        ptsDevice: req.pts_device,
+        projectName: req.project_name,
+    });
+    const noteParts = footerEl.content;
+    const sctx = { state: ctx.state, containerId: req.container_id };
+    const sk = req.state_key;
+    const nt = req.notification_type || 'AskUserQuestion';
+
+    if (questions.length > 1) {
+        await sendMultiQuestionFirstCard(app, questions, sk, req.pts_device, req.session_id, nt, noteParts, sctx);
+    } else if (questions[0].multiSelect) {
+        await sendMultiSelectCard(app, questions[0], sk, req.pts_device, req.session_id, nt, noteParts, sctx);
+    } else {
+        await sendSingleSelectCard(app, questions[0], sk, req.pts_device, req.session_id, nt, noteParts, sctx);
+    }
+}
+
 // ── Main ─────────────────────────────────────────────────
 
 async function main() {
@@ -261,51 +328,25 @@ async function main() {
     if (data.hook_event_name !== 'PreToolUse') return;
     if (data.tool_name !== 'AskUserQuestion') return;
 
-    // Guard: need Feishu app credentials
-    if (!process.env.FEISHU_APP_ID || !process.env.FEISHU_APP_SECRET) return;
+    const req = buildAskRequestFromHook(data);
+    if (!req) return;
 
+    // Relay mode: hand the fully-resolved request to the host and exit fast.
+    // (No Feishu creds needed in the container — the host owns Feishu.)
+    if (isRelayMode()) {
+        try {
+            enqueueRequest(req);
+        } catch (err) {
+            console.error('[ask-handler] outbox enqueue 失败:', err.message);
+        }
+        return;
+    }
+
+    // In-container fallback: send directly, listener injects locally.
+    if (!process.env.FEISHU_APP_ID || !process.env.FEISHU_APP_SECRET) return;
     const app = await getFeishuAppClient();
     if (!app) return;
-
-    const questions = data.tool_input?.questions;
-    if (!Array.isArray(questions) || questions.length === 0) return;
-
-    const sessionId = data.session_id || '';
-    const cwd = data.cwd || '';
-    const transcriptPath = data.transcript_path || '';
-
-    const stateKey = `feishu_ask_${sessionId.substring(0, 8)}_${Date.now()}`;
-    const ptsDevice = resolvePtsDevice(process.ppid);
-    const notificationType = 'AskUserQuestion';
-
-    // Extract context text from transcript (text blocks before the AskUserQuestion tool_use)
-    const contextText = extractContextText(transcriptPath);
-
-    // Attach contextText to question objects for use in card builders
-    questions.forEach(q => { q._contextText = contextText; });
-
-    // Build note parts (footer)
-    const projectName = getProjectName(cwd);
-    const footerEl = buildCardFooter({
-        host: 'claude',
-        ptsDevice,
-        projectName,
-    });
-    const noteParts = footerEl.content;
-
-    if (questions.length > 1) {
-        // Case C: multiple questions
-        await sendMultiQuestionFirstCard(app, questions, stateKey, ptsDevice, sessionId, notificationType, noteParts);
-    } else {
-        const q = questions[0];
-        if (q.multiSelect) {
-            // Case A: single multi-select
-            await sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts);
-        } else {
-            // Case B: single single-select
-            await sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, notificationType, noteParts);
-        }
-    }
+    await handleAskRequest(app, req, { state: sessionState });
 }
 
 if (require.main === module) {
@@ -319,5 +360,7 @@ module.exports = {
     sendSingleSelectCard,
     sendMultiSelectCard,
     sendMultiQuestionFirstCard,
+    buildAskRequestFromHook,
+    handleAskRequest,
     main,
 };

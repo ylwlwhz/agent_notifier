@@ -20,13 +20,37 @@ const { selectCard, card2, inputEl, escFooterRow, footer } = require('../lib/car
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const launcher = require('./launcher');
 
-const WS_MAX_AGE_MS = parseInt(process.env.FEISHU_WS_MAX_AGE_MIN || '25', 10) * 60_000;
+// 默认 0 = 不做定期强制重建。每次 close→start 都会在飞书服务端留下短暂的“僵尸注册”，
+// 期间事件被随机路由到僵尸连接 → 用户点击要靠运气（实测“点 2-3 次才成功一次”）。
+// SDK 自带 ping/pong 与断线自动重连，真死了它自己会恢复；仅在确有需要时
+// 用 FEISHU_WS_MAX_AGE_MIN>0 打开旧的定期重建行为。
+const WS_MAX_AGE_MS = parseInt(process.env.FEISHU_WS_MAX_AGE_MIN || '0', 10) * 60_000;
 const HEALTH_CHECK_INTERVAL_MS = 60_000;
+// pong 看门狗：本机 TUN/代理栈会让 socket 永远显示“健康”（TCP 终止在本地），上游断了
+// 也不会有 close/error；SDK 的 pingLoop 只发不验（"ping success" 仅指 send 没抛错）。
+// 唯一可靠的活性信号是「服务端来消息」——健康连接每 ≤2 分钟必有 ping/pong 往来，
+// 静默超过该阈值即判定僵尸并重建。
+const WS_SILENCE_MAX_MS = parseInt(process.env.FEISHU_WS_SILENCE_MAX_SEC || '300', 10) * 1000;
 
 class FeishuListener {
-    constructor() {
-        this.state = new SessionState();
+    /**
+     * @param {object} [opts]
+     * @param {SessionState} [opts.state]  override the state store (host service owns its own)
+     * @param {(notification:object)=>string} [opts.injectTargetFor]
+     *   map a notification to its injection target. Default returns
+     *   notification.pts_device (in-container: inject locally). The host service
+     *   supplies a wrapper that returns `exec@<container_id>@<pts_device>` so
+     *   injectKeys/injectText route the keystrokes into the owning container via
+     *   `docker exec` (see terminal-inject injectViaContainer). pts_device itself
+     *   stays clean for display/state; only the injection target is wrapped.
+     */
+    constructor(opts = {}) {
+        this.state = opts.state || new SessionState();
+        this.injectTargetFor = opts.injectTargetFor || null;
         this.lastEventTime = Date.now();
+        this._lastServerActivity = Date.now(); // 任何服务端消息（事件/ping/pong）都刷新
+        this._hookedWs = null;                 // 已挂 message 监听的底层 ws 实例
+        this._lastHealthTick = Date.now();     // 挂起（睡眠）检测：tick 间隔异常拉长
 
         const appId = process.env.FEISHU_APP_ID;
         const appSecret = process.env.FEISHU_APP_SECRET;
@@ -67,9 +91,9 @@ class FeishuListener {
                     (entry.notification_type === 'live_summary' || entry.notification_type === 'execution_summary')
                 );
                 if (isSummaryTextInput) {
-                    await injectText(entry.pts_device, response.value || '');
+                    await injectText(this._target(entry), response.value || '');
                 } else {
-                    await this.codexInputBridge.send(response, entry.pts_device, {
+                    await this.codexInputBridge.send(response, this._target(entry), {
                         interruptBeforeText: entry.notification_type === 'live_summary' && response.responseType === 'text',
                     });
                 }
@@ -81,6 +105,13 @@ class FeishuListener {
                 return true;
             },
         });
+    }
+
+    /** Injection target for a notification (clean pts locally, or exec@<cid>@ host-side). */
+    _target(notification) {
+        if (!notification) return null;
+        if (this.injectTargetFor) return this.injectTargetFor(notification);
+        return notification.pts_device;
     }
 
     start() {
@@ -99,8 +130,9 @@ class FeishuListener {
                 // 其他操作弹 toast
                 if (result && typeof result === 'object') {
                     if (result.card) {
+                        // handler 显式给的 toast（如过期警告）优先，别盖成假成功
                         return {
-                            toast: { type: 'success', content: result.label || '已操作' },
+                            toast: result.toast || { type: 'success', content: result.label || '已操作' },
                             card: result.card,
                         };
                     }
@@ -143,7 +175,11 @@ class FeishuListener {
      * Input:  { action: { tag: 'input', input_value: '...', value: { action_type, session_state_key } } }
      */
     async handleCardAction(data) {
-        const action = data?.action;
+        let action = data?.action; // let：submit_multi_form 会被就地换算成 submit_multi
+        // 兼容：部分组件（如 form 提交按钮）的 value 以 JSON 字符串送达，统一解析成对象
+        if (action && typeof action.value === 'string') {
+            try { action = { ...action, value: JSON.parse(action.value) }; } catch { /* 保留原样，下游按缺失处理 */ }
+        }
         // 观测：打印 input_value/event_id/create_time，用于区分「飞书去重没发」与「事件丢失」
         console.log('[feishu-listener] 收到回调',
             'type:', action?.value?.action_type,
@@ -151,14 +187,30 @@ class FeishuListener {
             'input:', JSON.stringify((action?.input_value || '').slice(0, 30)),
             'key:', action?.value?.session_state_key?.substring(0, 24),
             'event_id:', data?.event_id, 'create_time:', data?.create_time);
+        // form 提交按钮的回调不带 value（实测 2026-07：仅有 tag/name/form_value）——
+        // 用消息 id 反查通知补全路由信息
+        if (action && !action.value && action.form_value) {
+            const msgId = data?.context?.open_message_id;
+            const foundKey = this._findKeyByMessageId(msgId);
+            if (foundKey) {
+                action = { ...action, value: { action_type: 'submit_multi_form', session_state_key: foundKey } };
+                console.log('[feishu-listener] form 回调经 message_id 反查路由 →', foundKey);
+            }
+        }
         if (!action || !action.value) {
-            console.log('[feishu-listener] 收到无效的卡片回调');
+            // 原样倾倒 action：新组件的回调结构常与预期不符，没有这份现场无从修起
+            console.log('[feishu-listener] 收到无效的卡片回调, raw action:',
+                JSON.stringify(action || null).slice(0, 600),
+                'context:', JSON.stringify(data?.context || null).slice(0, 200));
             return;
         }
 
-        const { action_type, session_state_key } = action.value;
+        let { action_type } = action.value;
+        const { session_state_key } = action.value;
         if (!session_state_key) {
-            console.log('[feishu-listener] 卡片回调缺少 session_state_key');
+            // 原样倾倒 action：新组件的回调结构常与预期不符（如 form 按钮），没有这份现场无从修起
+            console.log('[feishu-listener] 卡片回调缺少 session_state_key, raw action:',
+                JSON.stringify(action).slice(0, 600));
             return;
         }
 
@@ -181,9 +233,13 @@ class FeishuListener {
         const notification = this.state.getNotification(session_state_key);
         if (!notification) {
             console.log('[feishu-listener] 通知已过期或已处理:', session_state_key);
-            // 诚实反馈：这张卡的通知已不在（多因重装清空 state 或已处理），别再弹绿色"已操作"
+            // 诚实反馈 + 就地改卡：过期卡与活卡长得一样会静默吞点击（用户只能反复重试），
+            // 第一次点击就把卡面替换成「已过期」，之后不会再邀请点击
             const isMenu = /^feishu_launch_/.test(session_state_key);
-            return { toast: { type: 'warning', content: isMenu ? '⚠️ 该菜单已过期，请重新发送 claude' : '⚠️ 该卡片已过期，请在终端重新触发' } };
+            return {
+                toast: { type: 'warning', content: isMenu ? '⚠️ 该菜单已过期，请重新发送 claude' : '⚠️ 该卡片已过期，请在终端重新触发' },
+                card: this._expiredCardPatch(isMenu),
+            };
         }
 
         // 启动菜单：无 pts_device，须在终端检查前分流
@@ -195,6 +251,12 @@ class FeishuListener {
         if (!notification.pts_device) {
             console.log('[feishu-listener] 终端未找到，无法注入');
             return { toast: { type: 'error', content: '未找到目标终端，无法注入' } };
+        }
+
+        // 表单版多选（multi_select_static + form 提交按钮）：换算成 "1 3" 编号文本，
+        // 复用 submit_multi 的解析与注入通路（手输编号方案仍兼容，作为兜底）。
+        if (action_type === 'submit_multi_form') {
+            ({ action, action_type } = this._multiFormToSubmitMulti(action, notification));
         }
 
         // 用户在卡片上选择选项 / 给出对话回复：立即另发一张"已收到"卡，
@@ -210,6 +272,55 @@ class FeishuListener {
         }
         // 控制类（中断 / Esc / 开启全局允许 / 仅展开 Other 输入框）：保持同步，原样返回各自反馈
         return this._injectInteraction(data, notification, action, action_type, session_state_key);
+    }
+
+    /** 消息 id → 通知的 state key（form 回调不带 value 时的路由兜底） */
+    _findKeyByMessageId(msgId) {
+        if (!msgId) return null;
+        try {
+            this.state.load();
+            for (const [k, v] of Object.entries(this.state.data)) {
+                if (v && typeof v === 'object' && v._message_id === msgId) return k;
+            }
+        } catch { /* 状态读取失败按未命中处理 */ }
+        return null;
+    }
+
+    /** 表单版多选提交 → 换算成 "1 3" / "1 4:文本" 编号文本，走 submit_multi 老通路。
+     *  form_value: { ms_opts: ['0','2'], ms_other: '自定义' }（单选时 ms_opts 可能是标量）。 */
+    _multiFormToSubmitMulti(action, notification) {
+        const fv = action.form_value || {};
+        let picked = fv.ms_opts == null ? [] : fv.ms_opts;
+        if (!Array.isArray(picked)) picked = [picked];
+        const otherText = String(fv.ms_other || '').trim();
+        const total = notification._ms_total || (notification._ms_options || []).length;
+        const parts = picked
+            .map(v => parseInt(v, 10))
+            .filter(n => !isNaN(n))
+            .map(n => String(n + 1)); // 下拉 value 是 0-indexed，编号文本是 1-indexed
+        if (otherText) parts.push(`${total + 1}:${otherText}`);
+        return {
+            action: { ...action, tag: 'input', input_value: parts.join(' ') },
+            action_type: 'submit_multi',
+        };
+    }
+
+    /** 过期回调的就地卡片替换：灰头 + 说明，去掉一切交互组件（回调响应格式要求 type:'raw'） */
+    _expiredCardPatch(isMenu) {
+        const hours = process.env.NOTIFICATION_EXPIRE_HOURS || 12;
+        return {
+            type: 'raw',
+            data: card2({
+                template: 'grey',
+                title: isMenu ? '菜单已过期' : '卡片已过期',
+                elements: [{
+                    tag: 'markdown',
+                    content: isMenu
+                        ? '该启动菜单已失效，请重新发送 `claude`。'
+                        : `通知已过期或已在终端处理（默认保留 ${hours} 小时）。如仍需回复，请在终端重新触发。`,
+                }],
+            }),
+        };
     }
 
     /** 是否属于「用户给出回复 / 选择选项」从而需要发"已收到"卡。
@@ -288,18 +399,18 @@ class FeishuListener {
         if (notification.host === 'codex') {
             try {
                 const response = await this.unifiedInteractionHandler.handleCardAction(data);
-                if (!response) return { toast: { type: 'warning', content: '⚠️ 交互已过期或无法路由' } };
+                if (!response) return;
                 return '已发送';
             } catch (err) {
                 console.error('[feishu-listener] codex 回调处理失败:', err.message);
-                return { toast: { type: 'error', content: '处理失败，请查看 listener 日志' } };
+                return '处理失败';
             }
         }
 
         // ── 多选卡片：输入框提交（必须在通用 input 处理之前） ──
         if (action_type === 'submit_multi') {
             const inputText = (action.input_value || '').trim();
-            if (!inputText) return '请输入选项编号';
+            if (!inputText) return { toast: { type: 'warning', content: '请先选择至少一个选项' } };
 
             const total = notification._ms_total || (notification._ms_options || []).length;
             const otherNum = total + 1; // Other 的 1-indexed 编号
@@ -328,48 +439,54 @@ class FeishuListener {
             console.log(`[feishu-listener] submit_multi → selected:`, [...selectedSet], 'total:', total, 'hasOther:', hasOther, 'otherText:', otherText);
 
             try {
-                // 终端结构：选项0..N-1 + Other + Submit（共 N+2 项）
+                // 当前 Claude Code 多选 TUI（实测 2026-07）：↑/↓ 导航，**Enter 勾选/取消**当前项，
+                // 末尾有一个 "Submit" 行、Enter 提交。结构：选项0..N-1 + "Type something"(Other) + Submit，
+                // 光标起始在选项0。旧 TUI 用 Space 勾选、结尾再按 '1' 确认——现已失效（Space 是 no-op，
+                // 且无二次确认对话框）。导航按每项一个 Down 不变：Enter 勾选保持光标不动，循环共 totalItems
+                // 个 Down 后正落在 Submit 行。
+                const ENTER = '\r';
                 const totalItems = total + 1; // 选项 + Other
                 const injected = []; // 调试日志
+                // 卡片弹出后光标默认停在第一项。先给 TUI 一点稳定时间，避免刚渲染时首个按键被丢。
+                await this.sleep(400);
                 for (let i = 0; i < totalItems; i++) {
                     if (i === total && hasOther) {
-                        // Other：先 Space 选中并打开内联输入（实测必须，否则文本无处可去、Other 不被选中），
-                        // 再输入文本；之后不要按 Enter（Enter 会把 Other 取消勾选）。靠循环末尾的 Down 去 Submit。
-                        await injectKeys(notification.pts_device, '\x20'); // Space 选中 Other + 打开输入
-                        injected.push(`Space@${i}(Other)`);
+                        // Other：Enter 打开 "Type something" 内联输入，逐字符输入文本。
+                        // 末尾牺牲空格：循环末尾的 Down(ESC 序列) 可能吞掉最后一个字符，让空格去挨这刀。
+                        // 注意：Other+自定义文本路径依赖内联输入的确切行为，需真机复核。
+                        await injectKeys(this._target(notification), ENTER); // Enter 打开 Other 输入
+                        injected.push(`Enter@${i}(Other)`);
                         await this.sleep(300);
                         if (otherText) {
-                            // 逐字符注入：模拟人手打字。整段一次性灌入会被内联输入当粘贴丢弃，
-                            // 而该输入框靠逐字键事件捕获/自动勾选。
-                            // 末尾加一个牺牲空格：随后的 Down(ESC 序列)会确定性吞掉最后一个字符，
-                            // 让空格去挨这刀，真实文本完整保留（空格若未被吞也只是无害尾随空格）。
                             for (const ch of otherText + ' ') {
-                                await injectKeys(notification.pts_device, ch);
+                                await injectKeys(this._target(notification), ch);
                                 await this.sleep(60);
                             }
                             injected.push(`Text("${otherText}")`);
                             await this.sleep(300);
                         }
                     } else if (selectedSet.has(i)) {
-                        await injectKeys(notification.pts_device, '\x20'); // Space 勾选
-                        injected.push(`Space@${i}`);
+                        await injectKeys(this._target(notification), ENTER); // Enter 勾选当前项
+                        injected.push(`Enter@${i}`);
                         await this.sleep(300);
                     }
-                    await injectKeys(notification.pts_device, '\x1b[B'); // ↓ 下一项
+                    await injectKeys(this._target(notification), '\x1b[B'); // ↓ 下一项
                     injected.push(`Down`);
                     await this.sleep(300);
                 }
-                // cursor 现在在 Submit 上 → Enter 提交，再隔一下按 1 确认 "Submit answers"
-                injected.push('Enter');
-                await injectKeys(notification.pts_device, '\r'); // Enter 提交
+                // cursor 现在落在 Submit 行 → Enter 打开 "Ready to submit your answers?" 确认框
+                await injectKeys(this._target(notification), ENTER);
+                injected.push('Enter(submit)');
+                // 确认框默认高亮 "1. Submit answers"，需再 Enter 完成提交。
+                // 实测：少了这一步会停在确认页、勾选生效但不提交（用户反馈）。
                 await this.sleep(500);
-                await injectKeys(notification.pts_device, '1'); // 确认 "Submit answers / Cancel"
-                injected.push("'1'(confirm)");
+                await injectKeys(this._target(notification), ENTER);
+                injected.push('Enter(confirm submit)');
                 console.log(`[feishu-listener] 注入序列:`, injected.join(' → '), '| device:', notification.pts_device);
                 await this.state.setLastInteractedDeviceAsync(notification.pts_device);
             } catch (err) {
                 console.error('[feishu-listener] 多选注入失败:', err.message);
-                return { toast: { type: 'error', content: '注入失败，终端可能已关闭' } };
+                return '注入失败';
             }
 
             const opts = notification._ms_options || [];
@@ -384,7 +501,7 @@ class FeishuListener {
             try {
                 if (notification.notification_type === 'permission_prompt') {
                     // 权限提示期望单个按键（如 "1"、"2"、"3"），不加回车
-                    await injectKeys(notification.pts_device, action.input_value.trim());
+                    await injectKeys(this._target(notification), action.input_value.trim());
                     console.log(`[feishu-listener] 已注入按键到 ${notification.pts_device}: ${action.input_value.trim()}`);
                 } else {
                     // 普通文本输入：含回车
@@ -392,17 +509,16 @@ class FeishuListener {
                     const otherMeta = notification.responses?.['_other_num'];
                     const otherAlreadyClicked = notification._other_clicked;
                     if (otherMeta && !otherAlreadyClicked) {
-                        await injectKeys(notification.pts_device, otherMeta.keys);
+                        await injectKeys(this._target(notification), otherMeta.keys);
                         await this.sleep(500);
                     }
-                    await injectText(notification.pts_device, action.input_value);
+                    await injectText(this._target(notification), action.input_value);
                     console.log(`[feishu-listener] 已注入文字到 ${notification.pts_device}: ${action.input_value.substring(0, 50)}`);
                 }
                 await this.state.setLastInteractedDeviceAsync(notification.pts_device);
             } catch (err) {
-                // 诚实反馈：默认 fallback 会弹绿色「已操作」，注入失败必须给红色错误
                 console.error('[feishu-listener] 文字注入失败:', err.message);
-                return { toast: { type: 'error', content: '注入失败，终端可能已关闭' } };
+                return;
             }
             // 多问题模式：删除并发送下一题；普通卡片：保留以支持多次回复
             if (notification._all_questions) {
@@ -421,16 +537,16 @@ class FeishuListener {
         const responseEntry = notification.responses?.[action_type];
         if (!responseEntry) {
             console.log('[feishu-listener] 未知操作:', action_type);
-            return { toast: { type: 'warning', content: `⚠️ 未知操作 ${action_type}` } };
+            return;
         }
 
         try {
-            await injectKeys(notification.pts_device, responseEntry.keys);
+            await injectKeys(this._target(notification), responseEntry.keys);
             console.log(`[feishu-listener] 已注入按键到 ${notification.pts_device}: ${responseEntry.label}`);
             await this.state.setLastInteractedDeviceAsync(notification.pts_device);
         } catch (err) {
             console.error('[feishu-listener] 注入失败:', err.message);
-            return { toast: { type: 'error', content: '注入失败，终端可能已关闭' } };
+            return;
         }
 
         // bypass 按钮：注入后还要把终端加入 autoApproveDevices（异步锁，避免冻结事件循环）
@@ -498,6 +614,7 @@ class FeishuListener {
                 session_id: notification.session_id,
                 notification_type: notification.notification_type,
                 pts_device: notification.pts_device,
+                container_id: notification.container_id, // carry routing across questions
                 created_at: Date.now(),
                 responses: qResponses,
                 _all_questions: questions,
@@ -531,7 +648,7 @@ class FeishuListener {
             if (!lastViaInput) {
                 try {
                     await this.sleep(500); // 等确认对话框渲染出来，否则 1 落空
-                    await injectKeys(notification.pts_device, '1');
+                    await injectKeys(this._target(notification), '1');
                     console.log('[feishu-listener] 多问题流程：末题按钮回答，已注入 1 确认提交');
                 } catch (err) {
                     console.error('[feishu-listener] 末题确认注入失败:', err.message);
@@ -679,13 +796,44 @@ class FeishuListener {
         } catch { return null; }
     }
 
-    checkHealth() {
+    /** 给底层 ws 实例挂 message 监听刷新 _lastServerActivity。
+     *  实例在 SDK 内部（重）连接后才存在/更换，故每次健康检查都尝试重挂。
+     *  依赖 SDK 私有结构 wsConfig.getWSInstance()——结构变化时安全降级（看门狗失效，主流程不受影响）。 */
+    _hookServerActivity() {
         try {
-            const info = this.wsClient.getReconnectInfo();
-            const age = Date.now() - info.lastConnectTime;
-            if (age > WS_MAX_AGE_MS) {
-                console.log(`[feishu-listener] WebSocket 连接已 ${Math.round(age / 60000)} 分钟未刷新，主动重连...`);
-                this.reconnect();
+            const inst = this.wsClient?.wsConfig?.getWSInstance?.();
+            if (!inst || inst === this._hookedWs) return;
+            this._hookedWs = inst;
+            this._lastServerActivity = Date.now();
+            inst.on('message', () => { this._lastServerActivity = Date.now(); });
+        } catch { /* 见注释：安全降级 */ }
+    }
+
+    checkHealth() {
+        const now = Date.now();
+        const tickGap = now - this._lastHealthTick;
+        this._lastHealthTick = now;
+        this._hookServerActivity();
+        try {
+            // 1. 挂起检测：定时器间隔被拉长说明进程曾被冻结（合盖睡眠等），
+            //    服务端多半已放弃连接而本端毫无感知 → 立即重建。
+            if (tickGap > HEALTH_CHECK_INTERVAL_MS + 90_000) {
+                console.log(`[feishu-listener] 进程曾挂起 ~${Math.round((tickGap - HEALTH_CHECK_INTERVAL_MS) / 1000)}s（睡眠唤醒？），重建连接`);
+                return this.reconnect();
+            }
+            // 2. pong 看门狗（见 WS_SILENCE_MAX_MS 注释）：服务端静默过久 = 僵尸连接。
+            if (WS_SILENCE_MAX_MS && now - this._lastServerActivity > WS_SILENCE_MAX_MS) {
+                console.log(`[feishu-listener] 服务端已静默 ${Math.round((now - this._lastServerActivity) / 1000)}s（僵尸连接），重建连接`);
+                return this.reconnect();
+            }
+            // 3. 旧的按龄强制重建，默认关闭（见 WS_MAX_AGE_MS 注释）
+            if (WS_MAX_AGE_MS) {
+                const info = this.wsClient.getReconnectInfo();
+                const age = now - info.lastConnectTime;
+                if (age > WS_MAX_AGE_MS) {
+                    console.log(`[feishu-listener] WebSocket 连接已 ${Math.round(age / 60000)} 分钟未刷新，主动重连...`);
+                    this.reconnect();
+                }
             }
         } catch (err) {
             console.error('[feishu-listener] 健康检查异常:', err.message);
@@ -705,12 +853,18 @@ class FeishuListener {
         });
         this.wsClient.start({ eventDispatcher: this.eventDispatcher });
         this.lastEventTime = Date.now();
+        this._hookedWs = null;                    // 新 client：下个健康检查重挂监听
+        this._lastServerActivity = Date.now();    // 重置看门狗，避免立刻再触发
         console.log('[feishu-listener] WebSocket 已重新连接');
     }
 
     stop() {
         if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
         if (this.cleanupInterval) clearInterval(this.cleanupInterval);
+        // 主动发 WS close 帧让服务端立刻注销本连接。进程直接死掉时 close/FIN
+        // 往往穿不过本机 TUN 送达服务端，注册会残留数分钟——期间用户点击被
+        // 随机路由到僵尸连接，表现为「已过期/出错了」。
+        try { this.wsClient && this.wsClient.close(); } catch { /* 尽力而为 */ }
         console.log('[feishu-listener] 监听器已停止');
     }
 

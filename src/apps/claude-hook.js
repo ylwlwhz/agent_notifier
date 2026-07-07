@@ -18,6 +18,7 @@ const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
 const { card2, statsTags, inputEl, buttonRow, footer, escFooterRow } = require('../lib/card');
 const { forEachTail, findTail, getAssistantText } = require('../lib/transcript-utils');
+const { isRelayMode, enqueueRequest, containerId } = require('../lib/relay');
 
 // ── 会话统计 ─────────────────────────────────────────────
 
@@ -233,22 +234,36 @@ async function getFeishuAppClient() {
 
 /** 发卡 + 注册回调路由：发送成功才记 sessionState；esc/interrupt 通用中断键在此统一注入 */
 async function sendCard(app, card, { stateKey, sessionId, type, ptsDevice, responses = {} }) {
+    const notification = {
+        session_id: sessionId,
+        notification_type: type,
+        pts_device: ptsDevice,
+        container_id: containerId(),
+        responses: {
+            ...responses,
+            esc: { keys: '\x1b', label: 'Esc' },
+            interrupt: { keys: '\x1b', label: '⛔ Interrupt' },
+        },
+    };
+
+    // Relay mode: host owns Feishu. Hand the pre-built card + notification to the
+    // host, which sends it and stores the notification (with container_id) in its
+    // own state; card-building/data-gathering stays here where the files live.
+    if (isRelayMode()) {
+        try {
+            enqueueRequest({ kind: 'send_card', state_key: stateKey, card, notification });
+        } catch (err) {
+            console.error('[feishu] outbox enqueue 失败:', err.message);
+        }
+        return;
+    }
+
     try {
         await app.client.im.message.create({
             params: { receive_id_type: 'chat_id' },
             data: { receive_id: app.chatId, msg_type: 'interactive', content: JSON.stringify(card) },
         });
-        sessionState.addNotification(stateKey, {
-            session_id: sessionId,
-            notification_type: type,
-            pts_device: ptsDevice,
-            created_at: Date.now(),
-            responses: {
-                ...responses,
-                esc: { keys: '\x1b', label: 'Esc' },
-                interrupt: { keys: '\x1b', label: '⛔ Interrupt' },
-            },
-        });
+        sessionState.addNotification(stateKey, { ...notification, created_at: Date.now() });
     } catch (err) {
         console.error('[feishu] 发送卡片失败:', err.message);
     }
@@ -262,8 +277,9 @@ async function sendFeishuAppCard(data, event, getStats) {
     const card = handler(data, getStats);
     if (!card) return; // handler 返 null 即跳过（Stop 增量空时）
 
-    const app = await getFeishuAppClient();
-    if (!app) return;
+    // Relay mode: no Feishu client needed in the container; the host sends.
+    const app = isRelayMode() ? null : await getFeishuAppClient();
+    if (!isRelayMode() && !app) return;
 
     // 末尾补输入框（卡片直接回话）+ 中断按钮与终端 id 同行
     const ptsDevice = resolvePtsDevice(process.ppid);
@@ -346,6 +362,28 @@ async function tryAskUserQuestion(app, data, { projectName, sessionPrefix, sessi
     const questions = Array.isArray(askInput?.questions) ? askInput.questions : [];
     if (!questions.length) return false;
 
+    // Relay mode: hand the ask to the host (same request shape as claude-ask's
+    // PreToolUse path). In the default bypassPermissions mode PreToolUse does not
+    // fire, so THIS is the path that actually delivers AskUserQuestion cards.
+    if (isRelayMode()) {
+        try {
+            enqueueRequest({
+                kind: 'ask',
+                questions,
+                session_id: sessionId,
+                context_text: askInput._contextText || '',
+                project_name: projectName,
+                pts_device: resolvePtsDevice(process.ppid),
+                container_id: containerId(),
+                state_key: `feishu_ask_${sessionPrefix}_${Date.now()}`,
+                notification_type: 'AskUserQuestion',
+            });
+        } catch (err) {
+            console.error('[feishu] ask outbox enqueue 失败:', err.message);
+        }
+        return true;
+    }
+
     const { sendSingleSelectCard, sendMultiSelectCard, sendMultiQuestionFirstCard } = require('./claude-ask');
     questions.forEach(q => { q._contextText = askInput._contextText || ''; });
     const ptsDevice = resolvePtsDevice(process.ppid);
@@ -364,8 +402,9 @@ async function tryAskUserQuestion(app, data, { projectName, sessionPrefix, sessi
 
 /** 飞书交互卡片（Notification 事件，带回调按钮）。main 已过滤 idle/elicitation，只剩 permission_prompt */
 async function sendFeishuInteractiveCard(data, getStats) {
-    const app = await getFeishuAppClient();
-    if (!app) return;
+    // Relay mode: the host owns Feishu; card sends are enqueued downstream.
+    const app = isRelayMode() ? null : await getFeishuAppClient();
+    if (!isRelayMode() && !app) return;
 
     const sessionId = data.session_id || '';
     const sessionPrefix = sessionId.substring(0, 8);
@@ -406,7 +445,8 @@ async function main() {
     const event = data.hook_event_name;
     if (!event) return;
 
-    if (!envConfig.getFeishuAppConfig().enabled) return;
+    // In relay mode the host owns Feishu creds; the container need not have them.
+    if (!isRelayMode() && !envConfig.getFeishuAppConfig().enabled) return;
 
     // 懒求值：优先用 statusLine 旁路落盘的官方成本/时长（与状态栏同源），无则回退 transcript 时长
     let statsVal, statsDone = false;

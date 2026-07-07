@@ -20,7 +20,10 @@ function sleepAsync(ms) {
 
 class SessionState {
     constructor(statePath) {
-        this.statePath = statePath || path.join(__dirname, '..', 'session-state.json');
+        this.statePath =
+            statePath ||
+            process.env.AGENT_NOTIFIER_STATE ||
+            path.join(__dirname, '..', 'session-state.json');
         this.tmpPath = this.statePath + '.tmp';
         this.lockPath = this.statePath + '.lock';
         this.data = {};

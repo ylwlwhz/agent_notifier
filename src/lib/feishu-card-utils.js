@@ -109,7 +109,10 @@ function buildFeishuTable(lines) {
 }
 
 /**
- * 构建多选卡片（输入框方案：用户输入选项编号，一次提交）
+ * 构建多选卡片：原生多选下拉（multi_select_static）+ Other 文本 + 提交按钮，
+ * 全部放进 form 容器 —— 一次回调（action.form_value）带回所有选择，无需手输编号。
+ * 回调侧由 feishu-listener._multiFormToSubmitMulti 换算成 "1 3" 编号文本，
+ * 复用 submit_multi 的解析与注入通路。
  * @param {Object} notification - sessionState 里的通知对象，含 _ms_options/_question/_context_text/_note_parts
  * @param {string} stateKey - session_state_key
  * @returns {Object} 飞书卡片 JSON
@@ -119,6 +122,7 @@ function buildMultiSelectCard(notification, stateKey) {
     const question = notification._question || '';
     const contextText = notification._context_text || '';
     const noteParts = notification._note_parts || '';
+    const descriptions = notification._ms_descriptions || [];
 
     const elements = [];
 
@@ -126,21 +130,35 @@ function buildMultiSelectCard(notification, stateKey) {
         elements.push(...parseMarkdownToElements(contextText));
         elements.push({ tag: 'hr' });
     }
+    if (question) elements.push(...parseMarkdownToElements(question));
 
-    // 问题 + 编号列表（含 Other）；有说明则在编号下补一行灰字
-    const descriptions = notification._ms_descriptions || [];
-    const optList = options.map((opt, i) => {
-        const d = descriptions[i];
-        return d ? `**${i + 1}.** ${opt}\n<font color='grey'>${d}</font>` : `**${i + 1}.** ${opt}`;
-    }).join('\n');
-    const otherNum = options.length + 1;
-    elements.push({ tag: 'markdown', content: `${question}\n\n${optList}\n**${otherNum}.** Other（自定义文本）\n\n输入编号（空格分隔），选 Other 加冒号写文本：\n如 \`1 3\` 或 \`1 ${otherNum}:我的文本\`` });
+    // 下拉项只放短标签；有说明的选项在卡面补一份灰字对照
+    const descLines = options
+        .map((opt, i) => (descriptions[i] ? `**${i + 1}. ${opt}** — <font color='grey'>${descriptions[i]}</font>` : null))
+        .filter(Boolean);
+    if (descLines.length) elements.push({ tag: 'markdown', content: descLines.join('\n') });
 
-    // 输入框（schema 2.0：直接入 body，无 action 容器）
     elements.push({
-        tag: 'input', name: 'multi_select_input',
-        placeholder: { tag: 'plain_text', content: `如 1 3 或 1 ${otherNum}:自定义文本` },
-        value: { action_type: 'submit_multi', session_state_key: stateKey },
+        tag: 'form', name: 'msForm',
+        elements: [
+            {
+                tag: 'multi_select_static', name: 'ms_opts', width: 'fill',
+                placeholder: { tag: 'plain_text', content: '点选一个或多个选项' },
+                options: options.map((opt, i) => ({
+                    text: { tag: 'plain_text', content: `${i + 1}. ${opt}` },
+                    value: String(i),
+                })),
+            },
+            {
+                tag: 'input', name: 'ms_other',
+                placeholder: { tag: 'plain_text', content: 'Other：自定义补充（可选）' },
+            },
+            {
+                tag: 'button', text: { tag: 'plain_text', content: '提交' }, type: 'primary',
+                form_action_type: 'submit', name: 'ms_submit',
+                value: { action_type: 'submit_multi_form', session_state_key: stateKey },
+            },
+        ],
     });
 
     if (noteParts) elements.push({ tag: 'markdown', content: noteParts });
