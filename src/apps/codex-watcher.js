@@ -329,17 +329,18 @@ class CodexWatcher {
                 const resp = await this.client.sendCard({ chatId, card: finalCard });
                 const messageId = resp?.data?.message_id || null;
                 const summaryStateKey = `codex_summary_msg_${ptsNum}`;
-                sessionState.load();
-                sessionState.data[summaryStateKey] = {
-                    ...(sessionState.data[summaryStateKey] || {}),
-                    message_id: messageId,
-                    state_key: stateKey,
-                    mode: 'execution_summary',
-                    assistant_key: assistantKey || null,
-                    updated_at: Date.now(),
-                    pts_device: ptsDevice,
-                };
-                sessionState.save();
+                // 锁内 fresh load 只写本键，避免旧快照整表回写清掉并发新增的通知
+                await sessionState.mutateAsync((data) => {
+                    data[summaryStateKey] = {
+                        ...(data[summaryStateKey] || {}),
+                        message_id: messageId,
+                        state_key: stateKey,
+                        mode: 'execution_summary',
+                        assistant_key: assistantKey || null,
+                        updated_at: Date.now(),
+                        pts_device: ptsDevice,
+                    };
+                });
                 console.log(`[codex-watcher] 已发送最终卡片(带输入框) -> ${ptsDevice}`);
             } catch (err) {
                 console.error(`[codex-watcher] 发送最终卡片失败:`, err.message);
@@ -487,16 +488,17 @@ class CodexWatcher {
                     created_at: stateEntry.created_at || Date.now(),
                     responses: stateEntry.responses || {},
                 });
-                sessionState.data[summaryStateKey] = {
-                    ...current,
-                    state_key: stateKey,
-                    mode,
-                    signature: signature || current.signature || null,
-                    assistant_key: assistantKey || current.assistant_key || null,
-                    updated_at: Date.now(),
-                    pts_device: ptsDevice,
-                };
-                sessionState.save();
+                await sessionState.mutateAsync((data) => {
+                    data[summaryStateKey] = {
+                        ...current,
+                        state_key: stateKey,
+                        mode,
+                        signature: signature || current.signature || null,
+                        assistant_key: assistantKey || current.assistant_key || null,
+                        updated_at: Date.now(),
+                        pts_device: ptsDevice,
+                    };
+                });
                 console.log(`[codex-watcher] 已 patch ${mode} 卡片 -> ${ptsDevice}`);
                 // patch 成功后启动定时器：内容稳定 3 秒后发最终卡片(带输入框)
                 this._scheduleFinalCard(ptsNum, summaryData, ptsDevice, stateKey, assistantKey);
@@ -510,28 +512,28 @@ class CodexWatcher {
         if (!chatId) return;
         const resp = await this.client.sendCard({ chatId, card });
         const messageId = resp?.data?.message_id || null;
-        sessionState.load();
-        const stateEntry = sessionState.data[stateKey] || {};
-        sessionState.data[stateKey] = {
-            ...stateEntry,
-            host: 'codex',
-            session_id: `codex_${ptsNum}`,
-            notification_type: mode,
-            pts_device: ptsDevice,
-            created_at: stateEntry.created_at || Date.now(),
-            responses: stateEntry.responses || {},
-        };
-        sessionState.data[summaryStateKey] = {
-            message_id: messageId,
-            state_key: stateKey,
-            mode,
-            signature: signature || null,
-            assistant_key: assistantKey || null,
-            created_at: Date.now(),
-            updated_at: Date.now(),
-            pts_device: ptsDevice,
-        };
-        sessionState.save();
+        await sessionState.mutateAsync((data) => {
+            const stateEntry = data[stateKey] || {};
+            data[stateKey] = {
+                ...stateEntry,
+                host: 'codex',
+                session_id: `codex_${ptsNum}`,
+                notification_type: mode,
+                pts_device: ptsDevice,
+                created_at: stateEntry.created_at || Date.now(),
+                responses: stateEntry.responses || {},
+            };
+            data[summaryStateKey] = {
+                message_id: messageId,
+                state_key: stateKey,
+                mode,
+                signature: signature || null,
+                assistant_key: assistantKey || null,
+                created_at: Date.now(),
+                updated_at: Date.now(),
+                pts_device: ptsDevice,
+            };
+        });
         console.log(`[codex-watcher] 已发送 ${mode} 卡片 -> ${ptsDevice}`);
     }
 }

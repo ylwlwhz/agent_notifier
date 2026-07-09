@@ -319,9 +319,9 @@ async function flushBuffer(bufferPath) {
         } catch { return; }
     }
 
-    // ── 加载 session state（按段索引追踪各卡 message_id）──────────────────────
+    // ── 读 session state 快照做决策（写回在结尾 mutateAsync 锁内 fresh load，只动本会话键）──
     const { sessionState } = require('../lib/session-state');
-    await sessionState.load();
+    sessionState.load();
 
     const stateKey = 'live_msg_' + sessionKey;
     const existing = sessionState.data[stateKey];
@@ -379,15 +379,18 @@ async function flushBuffer(bufferPath) {
             console.error('[live/flush] 合并到「已收到」卡失败，改为新发:', err.message);
             try { messageId = await sendCard(content); storedSig = sig; } catch (err2) { console.error('[live/flush] 发送失败:', err2.message); }
         }
-        delete sessionState.data[receivedKey]; // 消费掉，结尾 save 持久化（避免跨轮误用）
     } else {
         // 新轮、无「已收到」卡：照旧新发一张
         try { messageId = await sendCard(content); storedSig = sig; } catch (err) { console.error('[live/flush] 发送失败:', err.message); }
     }
 
     if (messageId) {
-        sessionState.data[stateKey] = { turnTs, message_id: messageId, sig: storedSig, merge: mergeInfo, created_at: Date.now() };
-        sessionState.save();
+        // 锁内 fresh load 只写本会话两个键：flush 的网络窗口内常有 hook 并发 addNotification，
+        // 旧快照整表 save 会把那些通知清掉 → 卡片一点就「已失效」。
+        await sessionState.mutateAsync((data) => {
+            if (mergeIntoReceived) delete data[receivedKey]; // 消费「已收到」卡，只并一次
+            data[stateKey] = { turnTs, message_id: messageId, sig: storedSig, merge: mergeInfo, created_at: Date.now() };
+        });
     }
 }
 

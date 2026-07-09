@@ -17,9 +17,15 @@
  */
 
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 const { createTerminalInjector } = require('../core/terminal-injector');
 const { createTerminalRouter } = require('../core/terminal-router');
+
+// Path of the in-container injection helper (see src/apps/inject-keys.js).
+// Overridable for tests via AGENT_NOTIFIER_INJECT_HELPER.
+const INJECT_HELPER =
+    process.env.AGENT_NOTIFIER_INJECT_HELPER ||
+    '/opt/agent-notifier/src/apps/inject-keys.js';
 
 // ── Shell 引用辅助 ──────────────────────────────────────────
 
@@ -164,6 +170,30 @@ function injectViaPtyMaster(ptsDevice, keys) {
     return true;
 }
 
+// ── 跨容器注入（host → 容器） ──────────────────────────────
+/**
+ * 在 host 上通过 `docker exec` 把按键交给目标容器内的注入助手。
+ * feishu-host 拥有飞书 WS 与状态，但注入必须发生在容器内部（FIFO / pty 都在
+ * 容器的 mount/pts 命名空间里），故委派给容器里的 inject-keys.js 执行。
+ * keys 以 base64 传递，避免命令行对控制字符（ESC 序列、CR）的破坏。
+ *
+ * @param {string} containerId  容器 id / 名（= 容器 hostname / docker 短 id）
+ * @param {string} innerTarget  容器内注入目标：fifo:/tmp/... | /dev/pts/N | tmux:...
+ * @param {string} keys
+ */
+function injectViaContainer(containerId, innerTarget, keys) {
+    if (!containerId) throw new Error('injectViaContainer: missing containerId');
+    if (!innerTarget) throw new Error('injectViaContainer: missing innerTarget');
+    const b64 = Buffer.from(keys, 'utf8').toString('base64');
+    const docker = process.env.AGENT_NOTIFIER_DOCKER || 'docker';
+    execFileSync(
+        docker,
+        ['exec', containerId, 'node', INJECT_HELPER, innerTarget, b64],
+        { timeout: 8000, stdio: 'pipe' },
+    );
+    return true;
+}
+
 // ── 按键注入 ────────────────────────────────────────────────
 
 /**
@@ -175,6 +205,17 @@ function injectViaPtyMaster(ptsDevice, keys) {
  */
 async function injectKeys(target, keys) {
     if (!target) throw new Error('No terminal target resolved');
+
+    // 跨容器路由：exec@<containerId>@<innerTarget>
+    // host 上的 feishu-host 通过 `docker exec` 把按键交给目标容器内的注入助手，
+    // 由它在容器本地把 innerTarget（fifo:/dev/pts/tmux）注入 Claude。innerTarget
+    // 自身含 ':'，故用首个 '@' 分隔 containerId 与 innerTarget。
+    if (typeof target === 'string' && target.startsWith('exec@')) {
+        const rest = target.slice('exec@'.length);
+        const sep = rest.indexOf('@');
+        if (sep < 0) throw new Error(`Invalid exec target: ${target}`);
+        return injectViaContainer(rest.slice(0, sep), rest.slice(sep + 1), keys);
+    }
 
     // 字符串目标自动转为 target 对象
     if (typeof target === 'string') {
@@ -359,6 +400,7 @@ module.exports = {
     resolvePtsDevice,
     injectKeys,
     injectText,
+    injectViaContainer,
     createTerminalInjector,
     createTerminalRouter,
 };
