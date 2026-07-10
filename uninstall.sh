@@ -233,11 +233,13 @@ remove_shell_injection() {
     if [ ! -f "$rc_file" ]; then
         return
     fi
-    if ! grep -q "Claude Code PTY 中继" "$rc_file" 2>/dev/null; then
+    # 同时识别 ftclaude 注入块与旧版 claude/codex 注入块（兼容清理旧安装残留）
+    if ! grep -Eq "ftclaude（飞书通知版 tclaude|Claude Code PTY 中继|Codex CLI PTY 中继" "$rc_file" 2>/dev/null; then
         return
     fi
 
     # 删除注入块（从开始标记到结束标记）
+    sed_inplace '/^# ── ftclaude（飞书通知版 tclaude，由 agent-notifier 安装脚本注入） ──$/,/^# ── ftclaude 结束 ──$/d' "$rc_file"
     sed_inplace '/^# ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Claude Code PTY 中继结束 ──$/d' "$rc_file"
     sed_inplace '/^# ── Codex CLI PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Codex CLI PTY 中继结束 ──$/d' "$rc_file"
     # 清理可能残留的连续空行（最多保留一个）

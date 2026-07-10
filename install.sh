@@ -1,7 +1,18 @@
 #!/usr/bin/env bash
 #
-# Claude/Codex CLI 通知系统 - 一键安装脚本
-# 幂等设计：重复运行不会重复注入
+# ftclaude 专用安装脚本（agent-notifier · 飞书通知链路）
+#
+# 只安装 ftclaude 这一套：
+#   - 注入 ftclaude() shell 函数（= tclaude + 飞书 hooks，经 pty-relay 中继）
+#   - 按当前安装目录校正 feishu-hooks.settings.json 内的 handler 路径
+#   - 启动并常驻飞书监听器服务（走公司代理出网）
+#
+# 刻意不做（与通用版的区别）：
+#   - 不写全局 ~/.claude/settings.json（ftclaude 用 `tclaude --settings` 叠加，不污染 claude/tclaude）
+#   - 不注入 claude()/codex() 覆盖原命令
+#   - 不配 statusLine、不装 claude-remote-shell
+#
+# 幂等设计：重复运行会先卸载再安装。
 #
 
 set -euo pipefail
@@ -20,28 +31,6 @@ info()    { echo -e "${BLUE}[信息]${NC} $1"; }
 success() { echo -e "${GREEN}[成功]${NC} $1"; }
 warn()    { echo -e "${YELLOW}[警告]${NC} $1"; }
 error()   { echo -e "${RED}[错误]${NC} $1"; }
-
-# ── 平台与包管理器探测（用于"缺失依赖"提示）──────────────
-OS="$(uname -s)"
-detect_pkg_hint() {
-    # $1 = 通用包名；按平台给出安装命令提示
-    local pkg="$1"
-    if [[ "$OS" == Darwin ]]; then
-        echo "brew install $pkg"
-    elif command -v apt-get &>/dev/null; then
-        echo "sudo apt-get install -y $pkg"
-    elif command -v dnf &>/dev/null; then
-        echo "sudo dnf install -y $pkg"
-    elif command -v yum &>/dev/null; then
-        echo "sudo yum install -y $pkg"
-    elif command -v pacman &>/dev/null; then
-        echo "sudo pacman -S $pkg"
-    elif command -v zypper &>/dev/null; then
-        echo "sudo zypper install $pkg"
-    else
-        echo "（请用系统包管理器安装 $pkg）"
-    fi
-}
 
 # ── 1. 检查依赖 ──────────────────────────────────────────
 info "正在检查系统依赖..."
@@ -74,34 +63,11 @@ if [ "$missing" -eq 1 ]; then
     exit 1
 fi
 
-# ── 1.2 增强依赖检测（缺失只警告 + 给安装命令，不中断）──────
-# jq：statusLine 脚本需要；bun/npx：跑 ccusage 需要；mutagen：claude-remote-shell 需要
-info "正在检查增强依赖（statusLine / ccusage / claude-remote-shell）..."
-
-if command -v jq &>/dev/null; then
-    success "jq $(jq --version 2>&1)"
+# tclaude 是 ftclaude 的底座，缺失只警告（运行 ftclaude 时才真正需要）
+if command -v tclaude &>/dev/null; then
+    success "tclaude 可用"
 else
-    warn "未找到 jq（statusLine 时间戳解析需要）。安装：$(detect_pkg_hint jq)"
-fi
-
-if command -v bun &>/dev/null; then
-    success "bun $(bun --version 2>&1)"
-elif command -v bunx &>/dev/null; then
-    success "bunx 可用"
-elif command -v npx &>/dev/null; then
-    success "npx 可用（将用 npx 运行 ccusage）"
-else
-    warn "未找到 bun/bunx/npx（statusLine 的 ccusage 需要其一）。建议安装 bun：curl -fsSL https://bun.sh/install | bash"
-fi
-
-if command -v mutagen &>/dev/null; then
-    success "mutagen $(mutagen version 2>&1 | head -1)"
-else
-    if [[ "$OS" == Darwin ]]; then
-        warn "未找到 mutagen（claude-remote-shell 远程同步需要）。安装：brew install mutagen-io/mutagen/mutagen"
-    else
-        warn "未找到 mutagen（claude-remote-shell 远程同步需要）。安装见：https://github.com/mutagen-io/mutagen/releases"
-    fi
+    warn "未找到 tclaude —— ftclaude 运行时需要它，请确认 tclaude 已在 PATH 中"
 fi
 
 echo ""
@@ -127,178 +93,78 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
     cp "$INSTALL_DIR/.env.example" "$INSTALL_DIR/.env"
     warn ".env 文件已从模板创建，请编辑填入实际配置："
     warn "  $INSTALL_DIR/.env"
+    warn "  本机出网需走代理，请确认已设置 http(s)_proxy 与 FEISHU_FORCE_PROXY=1"
     echo ""
 else
     success ".env 文件已存在，跳过"
     echo ""
 fi
 
-# ── 4. 配置 Claude Code Hooks ────────────────────────────
-info "正在配置 Claude Code Hooks..."
+# ── 4. 生成 feishu-hooks.settings.json（按安装目录校正路径）──
+# ftclaude 通过 `tclaude --settings <此文件>` 叠加飞书 hooks，只在 ftclaude 时生效，
+# 不写全局 ~/.claude/settings.json，也不改动 claude/tclaude 本身。
+info "正在生成 feishu-hooks.settings.json（按当前安装目录校正 handler 路径）..."
 
-SETTINGS_FILE="$HOME/.claude/settings.json"
-
-# 确保 ~/.claude 目录存在
-mkdir -p "$HOME/.claude"
-
-# 如果 settings.json 不存在则创建空 JSON
-if [ ! -f "$SETTINGS_FILE" ]; then
-    echo '{}' > "$SETTINGS_FILE"
-    info "已创建 $SETTINGS_FILE"
-fi
-
-# 用 node 内联脚本合并 hooks 配置（幂等：已有相同 hook 则跳过）
 node -e "
 const fs = require('fs');
-const settingsPath = '$SETTINGS_FILE';
-const installDir = '$INSTALL_DIR';
-const hookCommand = 'node ' + installDir + '/hook-handler.js';
-const liveCommand = 'node ' + installDir + '/live-handler.js';
-const askCommand = 'node ' + installDir + '/ask-handler.js';
+const dir = '$INSTALL_DIR';
+const p = dir + '/feishu-hooks.settings.json';
+const hookCmd = 'node ' + dir + '/hook-handler.js';
+const liveCmd = 'node ' + dir + '/live-handler.js';
+const askCmd  = 'node ' + dir + '/ask-handler.js';
 
-let settings;
-try {
-    settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-} catch (e) {
-    settings = {};
-}
-
-if (!settings.hooks) settings.hooks = {};
-
-const hooksConfig = {
-    'Stop': [
-        {
-            hooks: [{ type: 'command', command: hookCommand }]
-        }
-    ],
-    'Notification': [
-        {
-            matcher: 'permission_prompt|idle_prompt|elicitation_dialog',
-            hooks: [{ type: 'command', command: hookCommand }]
-        }
-    ],
-    'StopFailure': [
-        {
-            hooks: [{ type: 'command', command: hookCommand }]
-        }
-    ],
-    'PostToolUse': [
-        {
-            matcher: 'Bash|Write|Edit|NotebookEdit',
-            hooks: [{ type: 'command', command: liveCommand }]
-        }
-    ],
-    'PreToolUse': [
-        {
-            matcher: 'AskUserQuestion',
-            hooks: [{ type: 'command', command: askCommand }]
-        }
-    ]
+const cfg = {
+    hooks: {
+        Stop: [
+            { hooks: [{ type: 'command', command: hookCmd }] }
+        ],
+        Notification: [
+            { matcher: 'permission_prompt|idle_prompt|elicitation_dialog', hooks: [{ type: 'command', command: hookCmd }] }
+        ],
+        StopFailure: [
+            { hooks: [{ type: 'command', command: hookCmd }] }
+        ],
+        PostToolUse: [
+            { matcher: 'Bash|Write|Edit|NotebookEdit', hooks: [{ type: 'command', command: liveCmd }] }
+        ],
+        PreToolUse: [
+            { matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: askCmd }] }
+        ]
+    }
 };
 
-let changed = false;
-
-for (const [event, newRules] of Object.entries(hooksConfig)) {
-    if (!settings.hooks[event]) {
-        settings.hooks[event] = newRules;
-        changed = true;
-        console.log('  + 添加 Hook: ' + event);
-        continue;
-    }
-
-    // 检查是否已有相同 command 的 hook
-    const existing = settings.hooks[event];
-    const targetCmd = event === 'PostToolUse' ? liveCommand : event === 'PreToolUse' ? askCommand : hookCommand;
-    const hasHook = existing.some(rule =>
-        rule.hooks && rule.hooks.some(h => h.command === targetCmd)
-    );
-
-    if (!hasHook) {
-        // 追加到已有的 hook 列表
-        settings.hooks[event].push(...newRules);
-        changed = true;
-        console.log('  + 添加 Hook: ' + event);
-    } else {
-        console.log('  - 跳过 Hook: ' + event + '（已存在）');
-    }
-}
-
-if (changed) {
-    fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n');
-}
+fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n');
+console.log('  + 已写入 ' + p);
 "
 
-success "Claude Code Hooks 配置完成"
+success "feishu-hooks.settings.json 就绪"
 echo ""
 
-# ── 4.5 配置 statusLine（cost-capture + 跨平台 statusline.sh）──
-info "正在配置 statusLine..."
+# ── 5. 注入 ftclaude() shell 函数 ────────────────────────
+info "正在配置 ftclaude shell 函数..."
 
-STATUSLINE_SRC="$INSTALL_DIR/scripts/statusline.sh"
-STATUSLINE_DST="$HOME/.claude/statusline.sh"
-
-if [ ! -f "$STATUSLINE_SRC" ]; then
-    warn "未找到 $STATUSLINE_SRC，跳过 statusLine 配置"
-else
-    # 拷贝 statusline.sh（若用户已有且不同则备份）
-    if [ -f "$STATUSLINE_DST" ] && ! cmp -s "$STATUSLINE_SRC" "$STATUSLINE_DST"; then
-        cp "$STATUSLINE_DST" "${STATUSLINE_DST}.bak.$(date +%s 2>/dev/null || echo bak)"
-        warn "已备份原 statusline.sh 为 ${STATUSLINE_DST}.bak.*"
-    fi
-    cp "$STATUSLINE_SRC" "$STATUSLINE_DST"
-    chmod +x "$STATUSLINE_DST"
-
-    # 把 statusLine.command 接成：cost-capture.js（旁路抓官方成本）| statusline.sh
-    # 幂等：已是该命令则跳过；用户有自定义 statusLine 则备份 settings 并提示，不静默覆盖
-    STATUSLINE_CMD="node $INSTALL_DIR/src/apps/cost-capture.js | $STATUSLINE_DST"
-    node -e "
-const fs = require('fs');
-const p = '$SETTINGS_FILE';
-const want = '$STATUSLINE_CMD';
-let s;
-try { s = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { s = {}; }
-const cur = s.statusLine && s.statusLine.command;
-if (cur === want) { console.log('  - statusLine 已配置，跳过'); process.exit(0); }
-if (s.statusLine && cur && !cur.includes('cost-capture.js') && !cur.includes('$STATUSLINE_DST')) {
-    fs.writeFileSync(p + '.bak', JSON.stringify(s, null, 2) + '\n');
-    console.log('  ! 检测到自定义 statusLine，已备份 settings.json.bak 后覆盖');
-}
-s.statusLine = { type: 'command', command: want, padding: 0 };
-fs.writeFileSync(p, JSON.stringify(s, null, 2) + '\n');
-console.log('  + statusLine 已接入 cost-capture + statusline.sh');
-"
-    success "statusLine 配置完成"
-fi
-echo ""
-
-# ── 5. 注入 shell 函数 ───────────────────────────────────
-info "正在配置 shell 函数..."
-
-# claude()/codex() 函数内容
-# 解析真二进制用 `$(unset -f NAME; command -v NAME)`：子 shell 内临时移除同名函数，
-# command -v 即返回 PATH 中的可执行文件。bash 与 zsh 通用
-# （注意：`type -P` 是 bash 专有，zsh 的 type 不认 -P 会报错并返回空 → 注入空命令）。
+# ftclaude()：
+#   - 解析真实 tclaude 二进制（先在子 shell 里去掉 tclaude 的 alias/函数再取路径）
+#   - 追加 `--settings <飞书 hooks>` 叠加飞书通知，继承 IS_SANDBOX=1 --dangerously-skip-permissions
+#   - 非 tmux 环境经 pty-relay.py 中继，让飞书卡片输入能回注到终端
 AGENT_FUNCS=$(cat <<'EOF'
-# ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──
-claude() {
+# ── ftclaude（飞书通知版 tclaude，由 agent-notifier 安装脚本注入） ──
+ftclaude() {
+    local _ft_settings="__INSTALL_DIR__/feishu-hooks.settings.json"
+    local _ft_bin
+    _ft_bin="$(unalias tclaude 2>/dev/null; unset -f tclaude 2>/dev/null; command -v tclaude)"
+    if [ -z "$_ft_bin" ]; then
+        echo "ftclaude: 未找到 tclaude，请先安装 tclaude 或将其加入 PATH" >&2
+        return 127
+    fi
     if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        PTY_RELAY_OUTPUT_PREFIX=claude-pty-output PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(unset -f claude 2>/dev/null; command -v claude)" "$@"
+        IS_SANDBOX=1 PTY_RELAY_OUTPUT_PREFIX=claude-pty-output PTY_RELAY_ACTIVE=1 \
+            python3 __INSTALL_DIR__/bin/pty-relay.py "$_ft_bin" --dangerously-skip-permissions --settings "$_ft_settings" "$@"
     else
-        command claude "$@"
+        IS_SANDBOX=1 "$_ft_bin" --dangerously-skip-permissions --settings "$_ft_settings" "$@"
     fi
 }
-# ── Claude Code PTY 中继结束 ──
-
-# ── Codex CLI PTY 中继（由 claude-notifier 安装脚本注入） ──
-codex() {
-    local CODEX_BIN_CMD="${CODEX_BIN:-codex}"
-    if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        PTY_RELAY_OUTPUT_PREFIX=codex-pty-output PTY_RELAY_ACTIVE=1 python3 __INSTALL_DIR__/bin/pty-relay.py "$(unset -f codex 2>/dev/null; command -v "$CODEX_BIN_CMD")" "$@"
-    else
-        command "$CODEX_BIN_CMD" "$@"
-    fi
-}
-# ── Codex CLI PTY 中继结束 ──
+# ── ftclaude 结束 ──
 EOF
 )
 AGENT_FUNCS=${AGENT_FUNCS//__INSTALL_DIR__/$INSTALL_DIR}
@@ -314,36 +180,28 @@ sed_inplace() {
 
 remove_existing_agent_funcs() {
     local rc_file="$1"
-    sed_inplace '/^# ── Claude Code PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Claude Code PTY 中继结束 ──$/d' "$rc_file"
-    sed_inplace '/^# ── Codex CLI PTY 中继（由 claude-notifier 安装脚本注入） ──$/,/^# ── Codex CLI PTY 中继结束 ──$/d' "$rc_file"
+    sed_inplace '/^# ── ftclaude（飞书通知版 tclaude，由 agent-notifier 安装脚本注入） ──$/,/^# ── ftclaude 结束 ──$/d' "$rc_file"
 }
 
 inject_funcs() {
     local rc_file="$1"
     touch "$rc_file"
-    if grep -Eq "Claude Code PTY 中继|Codex CLI PTY 中继" "$rc_file" 2>/dev/null; then
+    if grep -q "ftclaude（飞书通知版 tclaude" "$rc_file" 2>/dev/null; then
         remove_existing_agent_funcs "$rc_file"
         printf '\n%s\n' "$AGENT_FUNCS" >> "$rc_file"
-        success "已更新 ${rc_file} 中的 claude()/codex() 函数"
+        success "已更新 ${rc_file} 中的 ftclaude() 函数"
     else
         printf '\n%s\n' "$AGENT_FUNCS" >> "$rc_file"
-        success "已将 claude()/codex() 函数注入 ${rc_file}"
+        success "已将 ftclaude() 函数注入 ${rc_file}"
     fi
 }
 
-# zsh：注入 ~/.zshenv 而非 ~/.zshrc。
-#   .zshenv 对所有 zsh 都加载（含 login 非交互），claude-remote-shell 的
-#   `zsh -l -c "exec claude ..."` 才能解析到函数、拉起 pty-relay；
-#   .zshrc 仅交互式加载，非交互路径会漏掉。
+# zsh：注入 ~/.zshenv（对所有 zsh 都加载，含非交互 login）。
 if command -v zsh &>/dev/null || [ -f "$HOME/.zshrc" ] || [ -f "$HOME/.zshenv" ]; then
     inject_funcs "$HOME/.zshenv"
 fi
 
-# bash：函数注入到 login 文件（.bash_profile 优先，无则 .profile）+ .bashrc 各一份。
-#   - login 文件对 `bash -l -c`（claude-remote-shell 的非交互 login 启动）无条件执行；
-#     而 .bashrc 在很多发行版（如 Ubuntu）顶部有 `case $- in *) return` 非交互即退出，
-#     无法靠 source .bashrc 覆盖非交互 login —— 故函数必须直接进 login 文件。
-#   - 同时注入 .bashrc，覆盖"交互式非 login bash"（在已登录会话里新开 bash）。
+# bash：注入 login 文件（.bash_profile 优先，无则 .profile）+ .bashrc 各一份。
 if command -v bash &>/dev/null; then
     bash_login_file="$HOME/.bash_profile"
     [ -f "$HOME/.bash_profile" ] || { [ -f "$HOME/.profile" ] && bash_login_file="$HOME/.profile"; }
@@ -351,48 +209,8 @@ if command -v bash &>/dev/null; then
     inject_funcs "$HOME/.bashrc"
 fi
 
-warn "请重新打开终端，或 source 对应的 rc 文件使其生效"
+warn "请重新打开终端，或 source 对应的 rc 文件使 ftclaude 生效"
 
-echo ""
-
-# ── 5.5 安装 claude-remote-shell（可选能力，总是尝试安装）──
-# 本体是单个 bash 脚本；macOS 若已 brew 安装则跳过。依赖的 mutagen 不自动装（见上方提示）。
-info "正在配置 claude-remote-shell..."
-
-CRS_VERSION="v0.1.4"
-CRS_URL="https://raw.githubusercontent.com/torarnv/claude-remote-shell/${CRS_VERSION}/claude-remote-shell"
-CRS_BIN="$HOME/.local/bin/claude-remote-shell"
-
-if command -v claude-remote-shell &>/dev/null; then
-    success "claude-remote-shell 已安装（$(command -v claude-remote-shell)），跳过"
-else
-    mkdir -p "$HOME/.local/bin"
-    if command -v curl &>/dev/null; then
-        # 重试 3 次：GitHub raw 偶发瞬时慢/限流，单次失败不代表网络不可用
-        crs_ok=0
-        for attempt in 1 2 3; do
-            if curl -fsSL --connect-timeout 10 --max-time 60 "$CRS_URL" -o "$CRS_BIN" 2>/dev/null && [ -s "$CRS_BIN" ]; then
-                crs_ok=1; break
-            fi
-            [ "$attempt" -lt 3 ] && sleep 2
-        done
-        if [ "$crs_ok" -eq 1 ]; then
-            chmod +x "$CRS_BIN"
-            ln -sf "$CRS_BIN" "$HOME/.local/bin/claude-remote-shell-yolo"
-            success "claude-remote-shell ${CRS_VERSION} 已安装到 $CRS_BIN"
-            case ":$PATH:" in
-                *":$HOME/.local/bin:"*) ;;
-                *) warn "请确保 \$HOME/.local/bin 在 PATH 中（可加入 rc 文件）" ;;
-            esac
-            command -v mutagen &>/dev/null || warn "claude-remote-shell 需要 mutagen 才能运行（见上方安装提示）"
-        else
-            rm -f "$CRS_BIN"
-            warn "claude-remote-shell 下载失败（网络或 tag 变动），跳过。手动安装见 https://github.com/torarnv/claude-remote-shell"
-        fi
-    else
-        warn "未找到 curl，无法自动安装 claude-remote-shell。手动安装见 https://github.com/torarnv/claude-remote-shell"
-    fi
-fi
 echo ""
 
 # ── 6. 配置并启动飞书监听器服务 ──────────────────────────
@@ -521,17 +339,17 @@ echo ""
 
 # ── 7. 完成信息 ──────────────────────────────────────────
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  Claude/Codex CLI 通知系统安装完成！${NC}"
+echo -e "${GREEN}  ftclaude 飞书通知安装完成！${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo ""
 info "安装目录: $INSTALL_DIR"
 info "配置文件: $INSTALL_DIR/.env"
-info "Hooks 配置: $SETTINGS_FILE"
-info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）"
+info "飞书 hooks: $INSTALL_DIR/feishu-hooks.settings.json（由 ftclaude --settings 叠加）"
+info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）中的 ftclaude()"
 echo ""
 info "后续步骤："
-echo "  1. 编辑 .env 填入飞书配置（如尚未配置）"
-echo "  2. 重新打开终端，或 source ~/.zshenv（zsh）/ ~/.bashrc（bash）加载函数"
-echo "  3. 使用 codex() 包装函数时，可通过 CODEX_BIN 指定可执行名"
+echo "  1. 编辑 .env 填入飞书配置与代理（如尚未配置）"
+echo "  2. 重新打开终端，或 source ~/.bashrc（bash）/ ~/.zshenv（zsh）加载 ftclaude"
+echo "  3. 直接运行 ftclaude 启动带飞书通知的 tclaude"
 echo ""
 success "祝使用愉快！"
