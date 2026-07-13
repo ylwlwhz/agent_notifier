@@ -7,6 +7,8 @@ const {
   parseSessionLine,
   recoverStateFromContent,
   selectSessionCandidate,
+  resolveSessionsRoot,
+  isCodexCliProcessArgs,
 } = require('../../src/apps/codex-session-watcher');
 
 test('parseSessionLine tracks turn id from turn_context', () => {
@@ -229,4 +231,17 @@ test('selectSessionCandidate falls back to newest mtime when no match metadata',
     { cwd: '/repo/a', processStartMs: Date.now() }
   );
   assert.equal(selected.path, '/s/new.jsonl');
+});
+
+test('resolveSessionsRoot uses CODEX_HOME when provided', () => {
+  assert.equal(
+    resolveSessionsRoot({ codexHome: '/home/u/.tcodex', home: '/home/u' }),
+    '/home/u/.tcodex/sessions'
+  );
+});
+
+test('isCodexCliProcessArgs accepts codex and tcodex process args', () => {
+  assert.equal(isCodexCliProcessArgs('/usr/local/bin/codex'), true);
+  assert.equal(isCodexCliProcessArgs('/usr/local/bin/tcodex --model gpt-5'), true);
+  assert.equal(isCodexCliProcessArgs('node /x/codex-session-watcher.js'), false);
 });

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 #
-# ftclaude 专用安装脚本（agent-notifier · 飞书通知链路）
+# ftclaude / ftcodex 专用安装脚本（agent-notifier · 飞书通知链路）
 #
-# 只安装 ftclaude 这一套：
+# 只安装 ft* 这一套：
 #   - 注入 ftclaude() shell 函数（= tclaude + 飞书 hooks，经 pty-relay 中继）
+#   - 注入 ftcodex() shell 函数（= tcodex + Codex PTY 中继/实时摘要）
 #   - 按当前安装目录校正 feishu-hooks.settings.json 内的 handler 路径
 #   - 启动并常驻飞书监听器服务（走公司代理出网）
 #
@@ -63,11 +64,17 @@ if [ "$missing" -eq 1 ]; then
     exit 1
 fi
 
-# tclaude 是 ftclaude 的底座，缺失只警告（运行 ftclaude 时才真正需要）
+# tclaude/tcodex 是 ft* 包装函数的底座，缺失只警告（运行对应命令时才真正需要）
 if command -v tclaude &>/dev/null; then
     success "tclaude 可用"
 else
     warn "未找到 tclaude —— ftclaude 运行时需要它，请确认 tclaude 已在 PATH 中"
+fi
+
+if command -v tcodex &>/dev/null; then
+    success "tcodex 可用"
+else
+    warn "未找到 tcodex —— ftcodex 运行时需要它，请确认 tcodex 已在 PATH 中"
 fi
 
 echo ""
@@ -140,13 +147,18 @@ console.log('  + 已写入 ' + p);
 success "feishu-hooks.settings.json 就绪"
 echo ""
 
-# ── 5. 注入 ftclaude() shell 函数 ────────────────────────
-info "正在配置 ftclaude shell 函数..."
+# ── 5. 注入 ftclaude() / ftcodex() shell 函数 ──────────────
+info "正在配置 ftclaude / ftcodex shell 函数..."
 
 # ftclaude()：
 #   - 解析真实 tclaude 二进制（先在子 shell 里去掉 tclaude 的 alias/函数再取路径）
 #   - 追加 `--settings <飞书 hooks>` 叠加飞书通知，继承 IS_SANDBOX=1 --dangerously-skip-permissions
 #   - 非 tmux 环境经 pty-relay.py 中继，让飞书卡片输入能回注到终端
+# ftcodex()：
+#   - 解析真实 tcodex 二进制，不覆盖系统 codex/tcodex 命令
+#   - 默认把 CODEX_HOME 指向 ~/.tcodex，便于 codex-session-watcher 读取 tcodex session
+#   - 经 pty-relay.py 中继，让飞书卡片输入能回注到终端（含 tmux 内运行）
+#   - 自动拉起 codex-watcher（若尚未运行），用于解析 Codex 交互提示
 AGENT_FUNCS=$(cat <<'EOF'
 # ── ftclaude（飞书通知版 tclaude，由 agent-notifier 安装脚本注入） ──
 ftclaude() {
@@ -165,6 +177,43 @@ ftclaude() {
     fi
 }
 # ── ftclaude 结束 ──
+
+# ── ftcodex（飞书通知版 tcodex，由 agent-notifier 安装脚本注入） ──
+_agent_notifier_ensure_codex_watcher() {
+    local _an_dir="__INSTALL_DIR__"
+    local _an_pid_file="${_an_dir}/codex-watcher.pid"
+    local _an_pid
+    if [ -f "$_an_pid_file" ]; then
+        _an_pid="$(cat "$_an_pid_file" 2>/dev/null || true)"
+        if [ -n "$_an_pid" ] && kill -0 "$_an_pid" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    if command -v node >/dev/null 2>&1; then
+        (
+            cd "$_an_dir" || exit 0
+            nohup node src/apps/codex-watcher.js >> codex-watcher.log 2>&1 &
+            echo $! > "$_an_pid_file"
+        ) >/dev/null 2>&1 || true
+    fi
+}
+
+ftcodex() {
+    local _ft_bin
+    _ft_bin="$(unalias tcodex 2>/dev/null; unset -f tcodex 2>/dev/null; command -v tcodex)"
+    if [ -z "$_ft_bin" ]; then
+        echo "ftcodex: 未找到 tcodex，请先安装 tcodex 或将其加入 PATH" >&2
+        return 127
+    fi
+    _agent_notifier_ensure_codex_watcher
+    if [[ -z "$PTY_RELAY_ACTIVE" ]]; then
+        CODEX_HOME="${CODEX_HOME:-$HOME/.tcodex}" PTY_RELAY_OUTPUT_PREFIX=codex-pty-output PTY_RELAY_ACTIVE=1 \
+            python3 __INSTALL_DIR__/bin/pty-relay.py "$_ft_bin" "$@"
+    else
+        CODEX_HOME="${CODEX_HOME:-$HOME/.tcodex}" "$_ft_bin" "$@"
+    fi
+}
+# ── ftcodex 结束 ──
 EOF
 )
 AGENT_FUNCS=${AGENT_FUNCS//__INSTALL_DIR__/$INSTALL_DIR}
@@ -181,18 +230,19 @@ sed_inplace() {
 remove_existing_agent_funcs() {
     local rc_file="$1"
     sed_inplace '/^# ── ftclaude（飞书通知版 tclaude，由 agent-notifier 安装脚本注入） ──$/,/^# ── ftclaude 结束 ──$/d' "$rc_file"
+    sed_inplace '/^# ── ftcodex（飞书通知版 tcodex，由 agent-notifier 安装脚本注入） ──$/,/^# ── ftcodex 结束 ──$/d' "$rc_file"
 }
 
 inject_funcs() {
     local rc_file="$1"
     touch "$rc_file"
-    if grep -q "ftclaude（飞书通知版 tclaude" "$rc_file" 2>/dev/null; then
+    if grep -Eq "ftclaude（飞书通知版 tclaude|ftcodex（飞书通知版 tcodex" "$rc_file" 2>/dev/null; then
         remove_existing_agent_funcs "$rc_file"
         printf '\n%s\n' "$AGENT_FUNCS" >> "$rc_file"
-        success "已更新 ${rc_file} 中的 ftclaude() 函数"
+        success "已更新 ${rc_file} 中的 ftclaude() / ftcodex() 函数"
     else
         printf '\n%s\n' "$AGENT_FUNCS" >> "$rc_file"
-        success "已将 ftclaude() 函数注入 ${rc_file}"
+        success "已将 ftclaude() / ftcodex() 函数注入 ${rc_file}"
     fi
 }
 
@@ -209,7 +259,7 @@ if command -v bash &>/dev/null; then
     inject_funcs "$HOME/.bashrc"
 fi
 
-warn "请重新打开终端，或 source 对应的 rc 文件使 ftclaude 生效"
+warn "请重新打开终端，或 source 对应的 rc 文件使 ftclaude / ftcodex 生效"
 
 echo ""
 
@@ -320,9 +370,14 @@ SVCEOF
             echo $! > "$INSTALL_DIR/feishu-listener.pid"
             success "飞书监听器已启动 (PID: $(cat "$INSTALL_DIR/feishu-listener.pid"))"
 
-            # 注册 crontab @reboot（幂等）
+            # 注册 crontab @reboot（幂等）。crontab 为空时 `crontab -l`/`grep -v` 会返回 1，
+            # 在 set -e + pipefail 下会让 install.sh 误退出，所以显式兜底为 true。
             CRON_CMD="@reboot cd $INSTALL_DIR && $NODE_BIN $INSTALL_DIR/feishu-listener.js >> $INSTALL_DIR/feishu-listener.log 2>&1 $CRON_MARKER"
-            ( crontab -l 2>/dev/null | grep -v "$CRON_MARKER"; echo "$CRON_CMD" ) | crontab -
+            CRON_TMP="$(mktemp)"
+            ( crontab -l 2>/dev/null || true ) | grep -v "$CRON_MARKER" > "$CRON_TMP" || true
+            echo "$CRON_CMD" >> "$CRON_TMP"
+            crontab "$CRON_TMP"
+            rm -f "$CRON_TMP"
             success "已注册 crontab @reboot 开机自启"
         fi
     fi
@@ -339,17 +394,18 @@ echo ""
 
 # ── 7. 完成信息 ──────────────────────────────────────────
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
-echo -e "${GREEN}  ftclaude 飞书通知安装完成！${NC}"
+echo -e "${GREEN}  ftclaude / ftcodex 飞书通知安装完成！${NC}"
 echo -e "${GREEN}════════════════════════════════════════════════════════${NC}"
 echo ""
 info "安装目录: $INSTALL_DIR"
 info "配置文件: $INSTALL_DIR/.env"
 info "飞书 hooks: $INSTALL_DIR/feishu-hooks.settings.json（由 ftclaude --settings 叠加）"
-info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）中的 ftclaude()"
+info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）中的 ftclaude() / ftcodex()"
 echo ""
 info "后续步骤："
 echo "  1. 编辑 .env 填入飞书配置与代理（如尚未配置）"
-echo "  2. 重新打开终端，或 source ~/.bashrc（bash）/ ~/.zshenv（zsh）加载 ftclaude"
-echo "  3. 直接运行 ftclaude 启动带飞书通知的 tclaude"
+echo "  2. 重新打开终端，或 source ~/.bashrc（bash）/ ~/.zshenv（zsh）加载 ftclaude / ftcodex"
+echo "  3. 运行 ftclaude 启动带飞书通知的 tclaude"
+echo "  4. 运行 ftcodex 启动带飞书通知的 tcodex"
 echo ""
 success "祝使用愉快！"

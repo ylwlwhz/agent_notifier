@@ -6,11 +6,21 @@ const { spawn, execSync } = require('node:child_process');
 
 require('../lib/env-config');
 
-const SESSIONS_ROOT = path.join(process.env.HOME || '', '.codex', 'sessions');
+function resolveSessionsRoot({ codexHome = process.env.CODEX_HOME, home = process.env.HOME || '' } = {}) {
+    const base = codexHome || path.join(home, '.codex');
+    return path.join(base, 'sessions');
+}
+
+const SESSIONS_ROOT = resolveSessionsRoot();
 const POLL_MS = 1000;
 const TOOL_ICONS = {
     exec_command: '⚡',
 };
+const CODEX_CLI_PROCESS_PATTERN = /(^|[\s/])t?codex(?:$|[\s/.])/i;
+
+function isCodexCliProcessArgs(args) {
+    return CODEX_CLI_PROCESS_PATTERN.test(String(args || ''));
+}
 
 function extractLastTokenUsage(payload) {
     const usage = payload?.info?.last_token_usage;
@@ -323,7 +333,7 @@ function readCodexProcessForPts(pts) {
             .filter(Boolean)
             .filter((row) =>
                 row.tty === targetTty &&
-                /\bcodex\b/i.test(row.args) &&
+                isCodexCliProcessArgs(row.args) &&
                 !/pty-relay\.py/i.test(row.args) &&
                 !/codex-session-watcher\.js/i.test(row.args)
             )
@@ -529,6 +539,8 @@ module.exports = {
     findLatestSessionFile,
     selectSessionCandidate,
     resolveSessionFileForPts,
+    resolveSessionsRoot,
+    isCodexCliProcessArgs,
     CodexSessionWatcher,
     extractLastTokenUsage,
 };
