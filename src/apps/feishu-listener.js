@@ -251,12 +251,10 @@ class FeishuListener {
         const notification = this.state.getNotification(session_state_key);
         if (!notification) {
             console.log('[feishu-listener] 通知已过期或已处理:', session_state_key);
-            // 诚实反馈 + 就地改卡：过期卡与活卡长得一样会静默吞点击（用户只能反复重试），
-            // 第一次点击就把卡面替换成「已过期」，之后不会再邀请点击
+            // 只用 toast 诚实反馈过期，卡片保留原样（内容还有查阅价值，不改灰、不撤交互组件）
             const isMenu = /^feishu_launch_/.test(session_state_key);
             return {
                 toast: { type: 'warning', content: isMenu ? '⚠️ 该菜单已过期，请重新发送 claude' : '⚠️ 该卡片已过期，请在终端重新触发' },
-                card: this._expiredCardPatch(isMenu),
             };
         }
 
@@ -320,24 +318,6 @@ class FeishuListener {
         return {
             action: { ...action, tag: 'input', input_value: parts.join(' ') },
             action_type: 'submit_multi',
-        };
-    }
-
-    /** 过期回调的就地卡片替换：灰头 + 说明，去掉一切交互组件（回调响应格式要求 type:'raw'） */
-    _expiredCardPatch(isMenu) {
-        const hours = process.env.NOTIFICATION_EXPIRE_HOURS || 12;
-        return {
-            type: 'raw',
-            data: card2({
-                template: 'grey',
-                title: isMenu ? '菜单已过期' : '卡片已过期',
-                elements: [{
-                    tag: 'markdown',
-                    content: isMenu
-                        ? '该启动菜单已失效，请重新发送 `claude`。'
-                        : `通知已过期或已在终端处理（默认保留 ${hours} 小时）。如仍需回复，请在终端重新触发。`,
-                }],
-            }),
         };
     }
 
