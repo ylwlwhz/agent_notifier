@@ -13,7 +13,7 @@ const path = require('path');
 const { envConfig } = require('../lib/env-config');
 const { sessionState } = require('../lib/session-state');
 const { resolvePtsDevice } = require('../lib/terminal-inject');
-const Lark = require('@larksuiteoapi/node-sdk');
+const { createAxiosLarkClient } = require('../channels/feishu/axios-lark-client');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const { buildCardFooter } = require('../lib/card-footer');
 const { card2, statsTags, inputEl, buttonRow, footer, escFooterRow } = require('../lib/card');
@@ -217,7 +217,7 @@ async function getFeishuAppClient() {
     const appSecret = process.env.FEISHU_APP_SECRET;
     if (!appId || !appSecret) return null;
 
-    const client = new Lark.Client({ appId, appSecret });
+    const client = createAxiosLarkClient({ appId, appSecret });
 
     let chatId = process.env.FEISHU_CHAT_ID;
     if (!chatId) {

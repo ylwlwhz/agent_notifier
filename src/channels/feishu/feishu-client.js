@@ -1,13 +1,14 @@
 'use strict';
 
-const Lark = require('@larksuiteoapi/node-sdk');
+const { createAxiosLarkClient } = require('./axios-lark-client');
 
 function createFeishuClient({ appId, appSecret }) {
     if (!appId || !appSecret) {
         throw new Error('createFeishuClient requires appId and appSecret');
     }
 
-    const client = new Lark.Client({ appId, appSecret });
+    // 用 axios 版 shim 替代 Lark SDK 的 HTTP client（SDK 传输层在强制代理下失效，见 axios-lark-client.js）
+    const client = createAxiosLarkClient({ appId, appSecret });
 
     return {
         client,

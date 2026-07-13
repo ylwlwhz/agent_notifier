@@ -38,10 +38,10 @@ async function notify(text, template) {
     const { FEISHU_APP_ID: appId, FEISHU_APP_SECRET: appSecret } = process.env;
     if (!appId || !appSecret || !RL_CHAT_ID) return;
     try {
-        const Lark = require('@larksuiteoapi/node-sdk');
+        const { createAxiosLarkClient } = require('../channels/feishu/axios-lark-client');
         const { card2 } = require('../lib/card');
         const card = card2({ template, title: 'claude 远程启动', elements: [{ tag: 'markdown', content: text }] });
-        await new Lark.Client({ appId, appSecret }).im.message.create({
+        await createAxiosLarkClient({ appId, appSecret }).im.message.create({
             params: { receive_id_type: 'chat_id' },
             data: { receive_id: RL_CHAT_ID, msg_type: 'interactive', content: JSON.stringify(card) },
         });
@@ -53,7 +53,7 @@ async function announceReady() {
     const { FEISHU_APP_ID: appId, FEISHU_APP_SECRET: appSecret } = process.env;
     if (!appId || !appSecret || !RL_CHAT_ID) return;
     try {
-        const Lark = require('@larksuiteoapi/node-sdk');
+        const { createAxiosLarkClient } = require('../channels/feishu/axios-lark-client');
         const { card2, inputEl, escFooterRow } = require('../lib/card');
         const { SessionState } = require('../lib/session-state');
         const stateKey = `feishu_${RL_NAME}_${Date.now()}`;
@@ -69,7 +69,7 @@ async function announceReady() {
                 escFooterRow(stateKey, `tmux:${RL_NAME}`), // 中断 + 右侧终端 id
             ],
         });
-        await new Lark.Client({ appId, appSecret }).im.message.create({
+        await createAxiosLarkClient({ appId, appSecret }).im.message.create({
             params: { receive_id_type: 'chat_id' },
             data: { receive_id: RL_CHAT_ID, msg_type: 'interactive', content: JSON.stringify(card) },
         });

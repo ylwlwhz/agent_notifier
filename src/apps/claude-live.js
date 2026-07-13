@@ -306,8 +306,8 @@ async function flushBuffer(bufferPath) {
     const appSecret = process.env.FEISHU_APP_SECRET;
     if (!appId || !appSecret) return;
 
-    const Lark = require('@larksuiteoapi/node-sdk');
-    const client = new Lark.Client({ appId, appSecret });
+    const { createAxiosLarkClient } = require('../channels/feishu/axios-lark-client');
+    const client = createAxiosLarkClient({ appId, appSecret });
 
     let chatId = process.env.FEISHU_CHAT_ID;
     if (!chatId) {
