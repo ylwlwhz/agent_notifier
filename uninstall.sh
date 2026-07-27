@@ -116,16 +116,22 @@ fi
 
 echo ""
 
-# ── 2. 移除 Claude Code Hooks ───────────────────────────
+# ── 2. 移除 Claude Code Hooks（~/.claude 与 tclaude 的 ~/.tclaude 都清）──
 info "正在移除 Claude Code Hooks..."
 
 SETTINGS_FILE="$HOME/.claude/settings.json"
 
-if [ -f "$SETTINGS_FILE" ]; then
-    node -e "
+# 从指定 settings.json 移除所有 command 含本安装目录的 hook（幂等，文件不存在则跳过）
+remove_hooks_from() {
+    local settings_file="$1"
+    if [ ! -f "$settings_file" ]; then
+        info "未找到 $settings_file，跳过"
+        return
+    fi
+    SETTINGS_FILE="$settings_file" INSTALL_DIR="$INSTALL_DIR" node -e "
 const fs = require('fs');
-const settingsPath = '$SETTINGS_FILE';
-const installDir = '$INSTALL_DIR';
+const settingsPath = process.env.SETTINGS_FILE;
+const installDir = process.env.INSTALL_DIR;
 
 let settings;
 try {
@@ -174,10 +180,11 @@ if (changed) {
     console.log('  无 hooks 需要移除');
 }
 "
-    success "Claude Code Hooks 已清理"
-else
-    info "未找到 $SETTINGS_FILE，跳过"
-fi
+    success "$settings_file 的 Hooks 已清理"
+}
+
+remove_hooks_from "$SETTINGS_FILE"
+remove_hooks_from "$HOME/.tclaude/settings.json"
 
 echo ""
 

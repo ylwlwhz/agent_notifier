@@ -5,11 +5,11 @@
 # 只安装 ft* 这一套：
 #   - 注入 ftclaude() shell 函数（= tclaude + 飞书 hooks，经 pty-relay 中继）
 #   - 注入 ftcodex() shell 函数（= tcodex + Codex PTY 中继/实时摘要）
-#   - 按当前安装目录校正 feishu-hooks.settings.json 内的 handler 路径
+#   - 将飞书 hooks 注册进 ~/.tclaude/settings.json（handler 按安装目录，靠 FTCLAUDE=1 环境闸）
 #   - 启动并常驻飞书监听器服务（走公司代理出网）
 #
 # 刻意不做（与通用版的区别）：
-#   - 不写全局 ~/.claude/settings.json（ftclaude 用 `tclaude --settings` 叠加，不污染 claude/tclaude）
+#   - 不写 ~/.claude/settings.json（只写 tclaude 的 ~/.tclaude/settings.json，不污染 claude）
 #   - 不注入 claude()/codex() 覆盖原命令
 #   - 不配 statusLine、不装 claude-remote-shell
 #
@@ -107,44 +107,19 @@ else
     echo ""
 fi
 
-# ── 4. 生成 feishu-hooks.settings.json（按安装目录校正路径）──
-# ftclaude 通过 `tclaude --settings <此文件>` 叠加飞书 hooks，只在 ftclaude 时生效，
-# 不写全局 ~/.claude/settings.json，也不改动 claude/tclaude 本身。
-info "正在生成 feishu-hooks.settings.json（按当前安装目录校正 handler 路径）..."
+# ── 4. 注册飞书 hooks 到 ~/.tclaude/settings.json（tclaude 的配置目录）──
+# 注意：tclaude 里 `--settings <文件>` 叠加的 hook 根本不 fire，必须写进真正的
+# settings 源 ~/.tclaude/settings.json（非 ~/.claude）。hook 内有 FTCLAUDE=1 环境闸，
+# 普通 tclaude 缺该变量会秒退不发卡，故全局注册对 claude/tclaude 无副作用。
+# 复用 scripts/setup-hooks.js（幂等 merge 写入，不清空既有 model/theme/statusLine 等）。
+TCLAUDE_SETTINGS="$HOME/.tclaude/settings.json"
+info "正在将飞书 hooks 注册进 $TCLAUDE_SETTINGS ..."
 
-node -e "
-const fs = require('fs');
-const dir = '$INSTALL_DIR';
-const p = dir + '/feishu-hooks.settings.json';
-const hookCmd = 'node ' + dir + '/hook-handler.js';
-const liveCmd = 'node ' + dir + '/live-handler.js';
-const askCmd  = 'node ' + dir + '/ask-handler.js';
+AGENT_NOTIFIER_DIR="$INSTALL_DIR" AGENT_NOTIFIER_STATUSLINE=0 \
+    CLAUDE_SETTINGS="$TCLAUDE_SETTINGS" \
+    node "$INSTALL_DIR/scripts/setup-hooks.js"
 
-const cfg = {
-    hooks: {
-        Stop: [
-            { hooks: [{ type: 'command', command: hookCmd }] }
-        ],
-        Notification: [
-            { matcher: 'permission_prompt|idle_prompt|elicitation_dialog', hooks: [{ type: 'command', command: hookCmd }] }
-        ],
-        StopFailure: [
-            { hooks: [{ type: 'command', command: hookCmd }] }
-        ],
-        PostToolUse: [
-            { matcher: 'Bash|Write|Edit|NotebookEdit', hooks: [{ type: 'command', command: liveCmd }] }
-        ],
-        PreToolUse: [
-            { matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: askCmd }] }
-        ]
-    }
-};
-
-fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n');
-console.log('  + 已写入 ' + p);
-"
-
-success "feishu-hooks.settings.json 就绪"
+success "hooks 已注册（普通 tclaude 缺 FTCLAUDE=1 会秒退，不受影响）"
 echo ""
 
 # ── 5. 注入 ftclaude() / ftcodex() shell 函数 ──────────────
@@ -152,7 +127,7 @@ info "正在配置 ftclaude / ftcodex shell 函数..."
 
 # ftclaude()：
 #   - 解析真实 tclaude 二进制（先在子 shell 里去掉 tclaude 的 alias/函数再取路径）
-#   - 追加 `--settings <飞书 hooks>` 叠加飞书通知，继承 IS_SANDBOX=1 --dangerously-skip-permissions
+#   - 设 FTCLAUDE=1 打开飞书 hook 环境闸（hooks 注册在 ~/.tclaude/settings.json），继承 IS_SANDBOX=1 --dangerously-skip-permissions
 #   - 非 tmux 环境经 pty-relay.py 中继，让飞书卡片输入能回注到终端
 # ftcodex()：
 #   - 解析真实 tcodex 二进制，不覆盖系统 codex/tcodex 命令
@@ -162,7 +137,8 @@ info "正在配置 ftclaude / ftcodex shell 函数..."
 AGENT_FUNCS=$(cat <<'EOF'
 # ── ftclaude（飞书通知版 tclaude，由 agent-notifier 安装脚本注入） ──
 ftclaude() {
-    local _ft_settings="__INSTALL_DIR__/feishu-hooks.settings.json"
+    # 飞书 hooks 注册在 ~/.tclaude/settings.json，靠 FTCLAUDE=1 环境闸只在 ftclaude 生效。
+    # （--settings 文件挂的 hook 在 tclaude 里不会执行，故不用 overlay。）
     local _ft_bin
     _ft_bin="$(unalias tclaude 2>/dev/null; unset -f tclaude 2>/dev/null; command -v tclaude)"
     if [ -z "$_ft_bin" ]; then
@@ -170,10 +146,10 @@ ftclaude() {
         return 127
     fi
     if [[ -z "$TMUX" && -z "$PTY_RELAY_ACTIVE" ]]; then
-        IS_SANDBOX=1 PTY_RELAY_OUTPUT_PREFIX=claude-pty-output PTY_RELAY_ACTIVE=1 \
-            python3 __INSTALL_DIR__/bin/pty-relay.py "$_ft_bin" --dangerously-skip-permissions --settings "$_ft_settings" "$@"
+        FTCLAUDE=1 IS_SANDBOX=1 PTY_RELAY_OUTPUT_PREFIX=claude-pty-output PTY_RELAY_ACTIVE=1 \
+            python3 __INSTALL_DIR__/bin/pty-relay.py "$_ft_bin" --dangerously-skip-permissions "$@"
     else
-        IS_SANDBOX=1 "$_ft_bin" --dangerously-skip-permissions --settings "$_ft_settings" "$@"
+        FTCLAUDE=1 IS_SANDBOX=1 "$_ft_bin" --dangerously-skip-permissions "$@"
     fi
 }
 # ── ftclaude 结束 ──
@@ -399,7 +375,7 @@ echo -e "${GREEN}═════════════════════
 echo ""
 info "安装目录: $INSTALL_DIR"
 info "配置文件: $INSTALL_DIR/.env"
-info "飞书 hooks: $INSTALL_DIR/feishu-hooks.settings.json（由 ftclaude --settings 叠加）"
+info "飞书 hooks: 已注册进 ~/.tclaude/settings.json（靠 FTCLAUDE=1 环境闸只在 ftclaude 生效）"
 info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）中的 ftclaude() / ftcodex()"
 echo ""
 info "后续步骤："
