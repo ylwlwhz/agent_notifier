@@ -262,6 +262,12 @@ remove_shell_injection "$HOME/.bashrc"
 remove_shell_injection "$HOME/.bash_profile"
 remove_shell_injection "$HOME/.profile"
 
+# 移除 ~/.ssh/config 中的 GitHub 代理块（git http(s).proxy 是用户通用配置，不动）
+if [ -f "$HOME/.ssh/config" ] && grep -q "agent-notifier: GitHub over HTTPS 代理" "$HOME/.ssh/config" 2>/dev/null; then
+    sed_inplace '/^# ── agent-notifier: GitHub over HTTPS 代理（由安装脚本注入） ──$/,/^# ── agent-notifier: GitHub over HTTPS 代理结束 ──$/d' "$HOME/.ssh/config"
+    success "已移除 ~/.ssh/config 中的 GitHub 代理块"
+fi
+
 echo ""
 
 # ── 4. 清理运行时文件 ───────────────────────────────────

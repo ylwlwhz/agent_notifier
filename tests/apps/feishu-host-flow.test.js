@@ -267,7 +267,7 @@ test('button reply (permission/Stop send_card path): callback → injection rout
     listener.stop();
 });
 
-test('expired notification: callback returns warning toast AND replaces card in place', async () => {
+test('expired notification: warning toast only, original card left intact (no patch)', async () => {
     const dir = tmp();
     const stateFile = path.join(dir, 'session-state.json');
     process.env.AGENT_NOTIFIER_STATE = stateFile;
@@ -286,18 +286,17 @@ test('expired notification: callback returns warning toast AND replaces card in 
     };
     const result = await listener.handleCardAction(callback);
     assert.equal(result.toast.type, 'warning', 'honest warning toast, not fake success');
-    assert.ok(result.card, 'card patch present so the dead card stops inviting clicks');
-    assert.equal(result.card.type, 'raw', 'callback card patch must be type raw');
-    const cardStr = JSON.stringify(result.card.data);
-    assert.ok(cardStr.includes('已过期'), 'replacement card visibly says expired');
-    assert.ok(!cardStr.includes('button'), 'replacement card has no interactive buttons');
+    assert.ok(!result.card, 'no card patch — expired card kept intact (its content still has reference value)');
+    assert.ok(result.toast.content.includes('已过期'), 'toast honestly says the card expired');
 
     // Menu variant gets the menu-specific wording.
     const menuResult = await listener.handleCardAction({
         event_id: 'e2', create_time: '2',
         action: { tag: 'button', value: { action_type: 'opt_0', session_state_key: 'feishu_launch_dead' } },
     });
-    assert.ok(JSON.stringify(menuResult.card.data).includes('claude'), 'menu variant tells user to resend claude');
+    assert.equal(menuResult.toast.type, 'warning', 'menu expiry is also a warning toast');
+    assert.ok(!menuResult.card, 'menu variant also leaves the card intact');
+    assert.ok(menuResult.toast.content.includes('claude'), 'menu variant tells user to resend claude');
 
     listener.stop();
 });

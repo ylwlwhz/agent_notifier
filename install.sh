@@ -239,6 +239,57 @@ warn "请重新打开终端，或 source 对应的 rc 文件使 ftclaude / ftcod
 
 echo ""
 
+# ── 5.5 Git / GitHub 出网走代理（仅当 env 里有 http(s)_proxy 时）────────
+# 本机所有出口必须走公司 HTTP 代理，SSH 直连 github 不通（Network is unreachable）。
+# ① 让 git 的 https 走代理；② ~/.ssh/config 把 github.com 走 ssh.github.com:443
+# + bin/proxy-connect.py 的 HTTP CONNECT 隧道（复用 ~/.ssh/id_rsa，无第三方依赖）。
+# 无代理的机器不注入，保持可移植（否则 proxy-connect 找不到代理反而会挡住 github）。
+_ft_proxy="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
+if [ -n "$_ft_proxy" ]; then
+    info "检测到出网代理 $_ft_proxy，正在配置 Git/GitHub 走代理..."
+
+    # ① git https 走代理（幂等）
+    git config --global http.proxy  "$_ft_proxy" 2>/dev/null || true
+    git config --global https.proxy "$_ft_proxy" 2>/dev/null || true
+
+    # ② ~/.ssh/config 注入 github over 443 via CONNECT（幂等，带标记块）
+    SSH_CFG="$HOME/.ssh/config"
+    mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh" 2>/dev/null || true
+    touch "$SSH_CFG"; chmod 600 "$SSH_CFG" 2>/dev/null || true
+    SSH_BLOCK=$(cat <<EOF
+# ── agent-notifier: GitHub over HTTPS 代理（由安装脚本注入） ──
+# 本机出网必须走公司 HTTP 代理，SSH 直连不通；走 ssh.github.com:443 + CONNECT 隧道。
+Host github.com
+    HostName ssh.github.com
+    Port 443
+    User git
+    IdentityFile ~/.ssh/id_rsa
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+    ProxyCommand python3 $INSTALL_DIR/bin/proxy-connect.py %h %p
+# ── agent-notifier: GitHub over HTTPS 代理结束 ──
+EOF
+)
+    # 先删旧块再追加（幂等）
+    sed_inplace '/^# ── agent-notifier: GitHub over HTTPS 代理（由安装脚本注入） ──$/,/^# ── agent-notifier: GitHub over HTTPS 代理结束 ──$/d' "$SSH_CFG"
+    printf '\n%s\n' "$SSH_BLOCK" >> "$SSH_CFG"
+    success "已配置 ~/.ssh/config：github.com 走 ssh.github.com:443 + 代理隧道"
+
+    # 传输已通≠认证已通：公钥未注册到 GitHub 账号时仍会 publickey 失败，打印公钥提示
+    if [ -f "$HOME/.ssh/id_rsa.pub" ]; then
+        if https_proxy="$_ft_proxy" ssh -o ConnectTimeout=15 -o BatchMode=yes -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+            success "GitHub SSH 认证 OK（可直接 git push）"
+        else
+            warn "SSH 传输已通，但公钥未被 GitHub 接受。请把下面这把公钥加到 https://github.com/settings/ssh/new ："
+            echo "    $(cat "$HOME/.ssh/id_rsa.pub")"
+        fi
+    fi
+else
+    info "env 中未发现 http(s)_proxy，跳过 Git/GitHub 代理配置（非强制代理机器无需）"
+fi
+
+echo ""
+
 # ── 6. 配置并启动飞书监听器服务 ──────────────────────────
 info "正在配置飞书监听器服务..."
 
@@ -377,6 +428,9 @@ info "安装目录: $INSTALL_DIR"
 info "配置文件: $INSTALL_DIR/.env"
 info "飞书 hooks: 已注册进 ~/.tclaude/settings.json（靠 FTCLAUDE=1 环境闸只在 ftclaude 生效）"
 info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）中的 ftclaude() / ftcodex()"
+if [ -n "${_ft_proxy:-}" ]; then
+    info "Git/GitHub: git https 走代理 + ~/.ssh/config 让 github 走 ssh.github.com:443 隧道"
+fi
 echo ""
 info "后续步骤："
 echo "  1. 编辑 .env 填入飞书配置与代理（如尚未配置）"
