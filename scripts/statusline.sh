@@ -5,7 +5,7 @@
 # 设计为 Linux / macOS 通用：
 #   - tail -r（BSD）→ 优先 tac（GNU），回退 tail -r
 #   - date -j（BSD 解析）→ 平台分支：GNU date -d / BSD date -j
-#   - bunx 硬编码 → PATH 查找 bunx || npx || bun x
+#   - ccusage 优先用已安装的（零网络零冷启动），再回退 bunx || npx || bun x
 #   - jq 缺失：静默输出空，绝不污染状态栏
 set -u
 
@@ -55,9 +55,13 @@ iso_to_hhmmss() {
 last_hhmmss=""
 [[ -n "$last_iso" ]] && last_hhmmss=$(iso_to_hhmmss "$last_iso")
 
-# ── ccusage：PATH 查找运行器（bunx / npx / bun x）──
+# ── ccusage：优先已安装的 ccusage 可执行文件——npx 的每容器冷缓存要现场经代理
+#    下载整个包，慢渲染会被 Claude 超时杀掉，状态栏就长时间不更新；
+#    本地装好的 ccusage 全程无网络。找不到再回退运行器（bunx / npx / bun x）──
 run_ccusage() {
-    if command -v bunx >/dev/null 2>&1; then
+    if command -v ccusage >/dev/null 2>&1; then
+        ccusage statusline 2>/dev/null
+    elif command -v bunx >/dev/null 2>&1; then
         bunx ccusage statusline 2>/dev/null
     elif command -v npx >/dev/null 2>&1; then
         npx -y ccusage statusline 2>/dev/null
