@@ -239,18 +239,37 @@ warn "请重新打开终端，或 source 对应的 rc 文件使 ftclaude / ftcod
 
 echo ""
 
-# ── 5.5 Git / GitHub 出网走代理（仅当 env 里有 http(s)_proxy 时）────────
+# ── 5.5 出网走代理（仅当 env 里有 http(s)_proxy 时）──────────────────────
 # 本机所有出口必须走公司 HTTP 代理，SSH 直连 github 不通（Network is unreachable）。
-# ① 让 git 的 https 走代理；② ~/.ssh/config 把 github.com 走 ssh.github.com:443
-# + bin/proxy-connect.py 的 HTTP CONNECT 隧道（复用 ~/.ssh/id_rsa，无第三方依赖）。
+# ① 让 git 的 https 走代理；①.5 让 Node fetch 走代理（tclaude/claude-code 更新检查用）；
+# ② ~/.ssh/config 把 github.com 走 ssh.github.com:443 + bin/proxy-connect.py 的 HTTP
+# CONNECT 隧道（复用 ~/.ssh/id_rsa，无第三方依赖）。
 # 无代理的机器不注入，保持可移植（否则 proxy-connect 找不到代理反而会挡住 github）。
 _ft_proxy="${https_proxy:-${HTTPS_PROXY:-${http_proxy:-${HTTP_PROXY:-}}}}"
 if [ -n "$_ft_proxy" ]; then
-    info "检测到出网代理 $_ft_proxy，正在配置 Git/GitHub 走代理..."
+    info "检测到出网代理 $_ft_proxy，正在配置出网走代理..."
 
     # ① git https 走代理（幂等）
     git config --global http.proxy  "$_ft_proxy" 2>/dev/null || true
     git config --global https.proxy "$_ft_proxy" 2>/dev/null || true
+
+    # ①.5 让 Node 自带 fetch/undici 也走环境代理（幂等，带标记块）
+    # undici 默认不读 http(s)_proxy，直连外网会超时 —— claude-code 的「检查更新」用的就是
+    # Node fetch，故 `tclaude update` 在强制代理机上报 "Unable to fetch latest version"。
+    # NODE_USE_ENV_PROXY=1 是 Node 24 的开关，让 fetch 认 env 里已有的 http(s)_proxy。
+    NODE_PROXY_BLOCK=$(cat <<'EOF'
+# ── agent-notifier: Node fetch 走环境代理（由安装脚本注入） ──
+# undici 默认不读 http(s)_proxy；开此开关后 Node fetch 才走公司代理（claude-code 更新检查等需要）。
+export NODE_USE_ENV_PROXY=1
+# ── agent-notifier: Node fetch 走环境代理结束 ──
+EOF
+)
+    for _rc in "$HOME/.bashrc" "$HOME/.zshenv"; do
+        touch "$_rc"
+        sed_inplace '/^# ── agent-notifier: Node fetch 走环境代理（由安装脚本注入） ──$/,/^# ── agent-notifier: Node fetch 走环境代理结束 ──$/d' "$_rc"
+        printf '\n%s\n' "$NODE_PROXY_BLOCK" >> "$_rc"
+    done
+    success "已让 Node fetch 走环境代理（NODE_USE_ENV_PROXY=1，写入 ~/.bashrc 与 ~/.zshenv）"
 
     # ② ~/.ssh/config 注入 github over 443 via CONNECT（幂等，带标记块）
     SSH_CFG="$HOME/.ssh/config"
@@ -429,7 +448,7 @@ info "配置文件: $INSTALL_DIR/.env"
 info "飞书 hooks: 已注册进 ~/.tclaude/settings.json（靠 FTCLAUDE=1 环境闸只在 ftclaude 生效）"
 info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）中的 ftclaude() / ftcodex()"
 if [ -n "${_ft_proxy:-}" ]; then
-    info "Git/GitHub: git https 走代理 + ~/.ssh/config 让 github 走 ssh.github.com:443 隧道"
+    info "出网代理: git https 走代理；Node fetch 走代理(NODE_USE_ENV_PROXY=1，修 tclaude/claude-code 更新检查)；~/.ssh/config 让 github 走 ssh.github.com:443 隧道"
 fi
 echo ""
 info "后续步骤："

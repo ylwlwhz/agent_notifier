@@ -268,6 +268,14 @@ if [ -f "$HOME/.ssh/config" ] && grep -q "agent-notifier: GitHub over HTTPS 代�
     success "已移除 ~/.ssh/config 中的 GitHub 代理块"
 fi
 
+# 移除注入的 NODE_USE_ENV_PROXY 块（机器自带的 http(s)_proxy export 是通用配置，不动）
+for _rc in "$HOME/.bashrc" "$HOME/.zshenv"; do
+    if [ -f "$_rc" ] && grep -q "agent-notifier: Node fetch 走环境代理" "$_rc" 2>/dev/null; then
+        sed_inplace '/^# ── agent-notifier: Node fetch 走环境代理（由安装脚本注入） ──$/,/^# ── agent-notifier: Node fetch 走环境代理结束 ──$/d' "$_rc"
+        success "已移除 $_rc 中的 Node 代理块"
+    fi
+done
+
 echo ""
 
 # ── 4. 清理运行时文件 ───────────────────────────────────
