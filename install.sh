@@ -295,8 +295,12 @@ EOF
     success "已配置 ~/.ssh/config：github.com 走 ssh.github.com:443 + 代理隧道"
 
     # 传输已通≠认证已通：公钥未注册到 GitHub 账号时仍会 publickey 失败，打印公钥提示
+    # ⚠️ `ssh -T git@github.com` **认证成功时退出码也是 1**（GitHub 不给 shell）。本脚本开了
+    # pipefail，直接写 `if ssh … | grep -q …` 会让整条管道判定为失败 → 明明能 push 也误报
+    # 「公钥未被接受」。故先把输出抓进变量（`|| true` 吃掉那个必然的非零），再对变量做匹配。
     if [ -f "$HOME/.ssh/id_rsa.pub" ]; then
-        if https_proxy="$_ft_proxy" ssh -o ConnectTimeout=15 -o BatchMode=yes -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+        _gh_out="$(https_proxy="$_ft_proxy" ssh -o ConnectTimeout=15 -o BatchMode=yes -T git@github.com 2>&1 || true)"
+        if printf '%s' "$_gh_out" | grep -q "successfully authenticated"; then
             success "GitHub SSH 认证 OK（可直接 git push）"
         else
             warn "SSH 传输已通，但公钥未被 GitHub 接受。请把下面这把公钥加到 https://github.com/settings/ssh/new ："

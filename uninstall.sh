@@ -59,8 +59,15 @@ else
     systemctl --user daemon-reload 2>/dev/null || true
 
     # 清理 crontab @reboot 条目
+    # ⚠️ `grep -v` 过滤后**无输出时退出码为 1**（我们那条常是 crontab 里唯一一行）。本脚本开了
+    # pipefail，直接写 `crontab -l | grep -v … | crontab -` 会让整条管道非零 → set -e 令脚本
+    # **静默中断在此处**，后面的 hooks / shell 注入 / 运行时文件清理全部不执行。
+    # 故 `|| true` 兜住，并用 install.sh 同款的临时文件写法。
     if crontab -l 2>/dev/null | grep -q "$CRON_MARKER"; then
-        crontab -l 2>/dev/null | grep -v "$CRON_MARKER" | crontab -
+        CRON_TMP="$(mktemp)"
+        ( crontab -l 2>/dev/null || true ) | grep -v "$CRON_MARKER" > "$CRON_TMP" || true
+        crontab "$CRON_TMP"
+        rm -f "$CRON_TMP"
         success "已移除 crontab @reboot 条目"
     fi
 fi
