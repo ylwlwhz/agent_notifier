@@ -291,6 +291,8 @@ EOF
 )
     # 先删旧块再追加（幂等）
     sed_inplace '/^# ── agent-notifier: GitHub over HTTPS 代理（由安装脚本注入） ──$/,/^# ── agent-notifier: GitHub over HTTPS 代理结束 ──$/d' "$SSH_CFG"
+    # 删块后把连续空行挤成一个，否则每次重装 printf 的前导 \n 都会多留一行
+    sed_inplace '/^$/N;/^\n$/D' "$SSH_CFG"
     printf '\n%s\n' "$SSH_BLOCK" >> "$SSH_CFG"
     success "已配置 ~/.ssh/config：github.com 走 ssh.github.com:443 + 代理隧道"
 
