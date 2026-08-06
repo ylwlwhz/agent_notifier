@@ -124,6 +124,21 @@ done < <(printf '%s' "$input" | jq -r '
     | select(.value.used_percentage != null)
     | "\(.key)\t\(.value.used_percentage | round)\t\(.value.resets_at // 0)"' 2>/dev/null)
 
+# ── 补上 ccusage 内置定价表里缺的 Claude 5 系列 ──
+# statusline 子命令默认 --offline，用的是 ccusage 打包进二进制的定价快照；那份快照
+# 还没有 claude-opus-5 / claude-sonnet-5，缺价的模型花费被整段算成 0（ccusage 自己
+# 会 WARN: "Missing embedded pricing for claude-opus-5"），于是 today / block 只剩
+# 零头——实测 $0.32，真实是 $21.33。--no-offline 能算对，但它每次渲染都要现拉
+# LiteLLM 的定价 JSON，实测 17 秒且没有磁盘缓存，放进状态栏就是之前那个「慢渲染被
+# Claude 杀掉、状态栏冻住」的老毛病。
+# 所以走 ccusage 官方的 CCUSAGE_MODEL_ALIASES，把 Claude 5 映射到内置表里费率完全
+# 相同的旧型号：Opus 5 与 Opus 4.6 同为 $5/$25，Sonnet 5 与 Sonnet 4.5 同为 $3/$15。
+# 实测与 --no-offline 的结果一分不差（$26.23 = $26.23），且仍然零网络（0.02s）。
+# 注：Sonnet 5 到 2026-08-31 有 $2/$10 促销价，内置表和 LiteLLM 线上表都没反映，
+# 这期间两边都会把 sonnet 那部分算高——不是这里引入的偏差。
+# 等某个 ccusage 版本内置了 Claude 5 定价，这行就可以删掉；外部已设则不覆盖。
+export CCUSAGE_MODEL_ALIASES="${CCUSAGE_MODEL_ALIASES:-claude-opus-5=claude-opus-4-6,claude-sonnet-5=claude-sonnet-4-5}"
+
 # ── ccusage：优先已安装的 ccusage 可执行文件——npx 的每容器冷缓存要现场经代理
 #    下载整个包，慢渲染会被 Claude 超时杀掉，状态栏就长时间不更新；
 #    本地装好的 ccusage 全程无网络。找不到再回退运行器（bunx / npx / bun x）──
