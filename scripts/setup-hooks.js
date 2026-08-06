@@ -78,9 +78,20 @@ if (process.env.AGENT_NOTIFIER_STATUSLINE !== '0') {
     const statuslineDst = path.join(os.homedir(), '.claude', 'statusline.sh');
     if (fs.existsSync(statuslineDst)) {
         const want = `node ${installDir}/src/apps/cost-capture.js | ${statuslineDst}`;
-        const cur = settings.statusLine && settings.statusLine.command;
-        if (cur !== want) {
-            settings.statusLine = { type: 'command', command: want, padding: 0 };
+        // refreshInterval：官方选项，「除事件驱动更新外，每 N 秒重跑一次状态栏命令」。
+        // 没有它，状态栏只在会话事件时重渲染：空闲窗口里 ccusage 用量、套餐限额和
+        // 重置倒计时会一直停在旧值，直到你敲下一个键。
+        const wantRefresh = 30;
+        const cur = (settings.statusLine && typeof settings.statusLine === 'object')
+            ? settings.statusLine
+            : {};
+        if (cur.command !== want || cur.refreshInterval !== wantRefresh) {
+            settings.statusLine = {
+                type: 'command',
+                command: want,
+                padding: 0,
+                refreshInterval: wantRefresh,
+            };
             changed = true;
         }
     }
