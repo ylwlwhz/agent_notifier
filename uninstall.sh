@@ -275,6 +275,12 @@ if [ -f "$HOME/.ssh/config" ] && grep -q "agent-notifier: GitHub over HTTPS 代�
     success "已移除 ~/.ssh/config 中的 GitHub 代理块"
 fi
 
+# 移除 ~/.npmrc 中注入的 npm 源与代理块（用户自己写的 registry 等行不动）
+if [ -f "$HOME/.npmrc" ] && grep -q "agent-notifier: npm 源与代理" "$HOME/.npmrc" 2>/dev/null; then
+    sed_inplace '/^# ── agent-notifier: npm 源与代理（由安装脚本注入） ──$/,/^# ── agent-notifier: npm 源与代理结束 ──$/d' "$HOME/.npmrc"
+    success "已移除 ~/.npmrc 中的 npm 源与代理块"
+fi
+
 # 移除注入的 NODE_USE_ENV_PROXY 块（机器自带的 http(s)_proxy export 是通用配置，不动）
 for _rc in "$HOME/.bashrc" "$HOME/.zshenv"; do
     if [ -f "$_rc" ] && grep -q "agent-notifier: Node fetch 走环境代理" "$_rc" 2>/dev/null; then

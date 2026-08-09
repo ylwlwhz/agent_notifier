@@ -271,6 +271,35 @@ EOF
     done
     success "已让 Node fetch 走环境代理（NODE_USE_ENV_PROXY=1，写入 ~/.bashrc 与 ~/.zshenv）"
 
+    # ①.6 npm 的源与代理写进 ~/.npmrc（幂等标记块）
+    # ⚠️ 必须落**磁盘**，只设 env 修不干净 —— 实测两条独立原因：
+    #   a) tclaude 拉起子进程 claude.exe 时会**剥离 http(s)_proxy**（实测父进程 environ 有、子进程无）；
+    #   b) 长跑的 tclaude/claude session 环境**冻结在启动时刻**，事后新加的 env 对它们完全无效
+    #      （本机有跑了 10+ 天的会话，缺 proxy 也缺 npm_config_registry）。
+    # 而「检查更新」最终 shell out 到 `npm view`，npm 每次调用都重读 ~/.npmrc，故写盘是唯一能同时
+    # 治好上面两种情况的修法。否则报 "Unable to fetch latest version from npm registry"。
+    # npmrc 重复 key **后出现者胜**（实测），所以块追加在末尾即可覆盖用户早先的行，不必改动原内容。
+    NPMRC="$HOME/.npmrc"
+    touch "$NPMRC"; chmod 600 "$NPMRC" 2>/dev/null || true
+    sed_inplace '/^# ── agent-notifier: npm 源与代理（由安装脚本注入） ──$/,/^# ── agent-notifier: npm 源与代理结束 ──$/d' "$NPMRC"
+    sed_inplace '/^$/N;/^\n$/D' "$NPMRC"
+    {
+        printf '\n# ── agent-notifier: npm 源与代理（由安装脚本注入） ──\n'
+        printf '# 别只依赖环境变量：tclaude 会剥掉子进程的 proxy，长跑会话的 env 也冻结在启动时刻。\n'
+        printf 'proxy=%s\n' "$_ft_proxy"
+        printf 'https-proxy=%s\n' "$_ft_proxy"
+        # 内网镜像同时代理公网包，且 @tencent/* 只在镜像上有（官方源 404），故优先沿用机器已选的源
+        if [ -n "${npm_config_registry:-}" ]; then
+            printf 'registry=%s\n' "$npm_config_registry"
+        fi
+        # 镜像/内网域名要直连，不能走代理
+        if [ -n "${no_proxy:-}" ]; then
+            printf 'noproxy=%s\n' "$no_proxy"
+        fi
+        printf '# ── agent-notifier: npm 源与代理结束 ──\n'
+    } >> "$NPMRC"
+    success "已把 npm 源与代理写入 ~/.npmrc（修 claude/tclaude update 拉不到版本）"
+
     # ② ~/.ssh/config 注入 github over 443 via CONNECT（幂等，带标记块）
     SSH_CFG="$HOME/.ssh/config"
     mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh" 2>/dev/null || true
