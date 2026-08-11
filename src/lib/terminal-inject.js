@@ -40,7 +40,7 @@ function shellQuote(str) {
  *
  * 返回格式:
  *   { type: 'tmux', target: 'session:window.pane' }
- *   { type: 'pts',  target: '/dev/pts/N' }
+ *   { type: 'pts',  target: '/dev/pts/N'（Linux）| '/dev/ttysNNN'（macOS） }
  *   null — 无法解析
  */
 function resolveTarget(startPid) {
@@ -223,7 +223,10 @@ async function injectKeys(target, keys) {
             target = { type: 'tmux', target: target.substring(5) };
         } else if (target.startsWith('fifo:')) {
             target = { type: 'fifo', target: target.substring(5) };
-        } else if (target.startsWith('/dev/pts/')) {
+        } else if (target.startsWith('/dev/pts/') || /^\/dev\/tty[sp]/.test(target)) {
+            // Linux 是 /dev/pts/N，macOS 是 /dev/ttysNNN（resolveTarget 的 darwin 分支
+            // 就按后者拼）。这里必须两种都认，否则 macOS 上一律落到下面的 throw，
+            // 注入根本到不了终端。
             target = { type: 'pts', target: target };
         } else {
             throw new Error(`Unknown target format: ${target}`);
@@ -238,10 +241,13 @@ async function injectKeys(target, keys) {
         try {
             return injectViaFifo(target.target, keys);
         } catch (fifoErr) {
-            // FIFO 写入失败（relay 未运行），从路径提取 pts 编号，尝试 pty master
-            const match = target.target.match(/agent-inject-pts(\d+)$/);
+            // FIFO 写入失败（relay 未运行），从路径还原 tty 设备，尝试 pty master。
+            // 后缀既可能是 Linux 的纯数字（→ /dev/pts/N），也可能是 macOS 的
+            // ttysNNN（→ /dev/ttysNNN）——FIFO 名取的是 slave basename。
+            const match = target.target.match(/agent-inject-pts(.+)$/);
             if (match) {
-                const ptsDevice = `/dev/pts/${match[1]}`;
+                const suffix = match[1];
+                const ptsDevice = /^\d+$/.test(suffix) ? `/dev/pts/${suffix}` : `/dev/${suffix}`;
                 try {
                     return injectViaPtyMaster(ptsDevice, keys);
                 } catch {}
@@ -273,7 +279,12 @@ async function injectKeys(target, keys) {
             if (tmuxTarget) {
                 return injectViaTmux(tmuxTarget, keys);
             }
-            throw new Error(`无法注入终端。请在 tmux 中启动 Claude Code，或使用 pty-relay.py 建立终端桥接。具体错误: ${tiocErr.message}`);
+            // 首句自成完整信息：这条消息会被截断后塞进飞书 toast（上限 100 字），
+            // 底层 python/ioctl 的堆栈放最后，截掉也不影响用户判断。
+            throw new Error(
+                `无法注入 ${target.target}（该终端可能已关闭）。请在终端重新触发，或用 tmux / pty-relay.py 建立桥接。` +
+                `底层错误: ${tiocErr.message}`
+            );
         }
     }
 
@@ -351,7 +362,9 @@ function injectViaTmux(target, keys) {
  * 通过 TIOCSTI ioctl 逐字符注入
  */
 function injectViaTiocsti(ptsDevice, keys) {
-    if (!ptsDevice.startsWith('/dev/pts/')) {
+    // 同时接受 Linux 的 /dev/pts/N 与 macOS 的 /dev/ttysNNN；仍然校验形状，
+    // 不让任意路径流进下面的 python。
+    if (!/^\/dev\/(pts\/\d+|tty[sp][a-z0-9]+)$/.test(ptsDevice)) {
         throw new Error(`Invalid pts device path: ${ptsDevice}`);
     }
 
