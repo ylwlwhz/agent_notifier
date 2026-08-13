@@ -261,3 +261,29 @@ Codex + 飞书联调至少需要这些进程在线：
 - 改 install.sh 后在干净环境验**幂等**（重跑先 uninstall 再装，不残留、不重复注入）。
 - 注入类改动要做**字节级验证**（pane 内 `timeout 3 cat | od -c` 看实收字节），不要只看"没报错"。
 
+### 11.7 强制代理机：`NODE_USE_ENV_PROXY=1` 与 axios 会「双重代理」死锁
+
+本机 `~/.bashrc` 注入了 `NODE_USE_ENV_PROXY=1`（Node 24 开关，让内核 `fetch`/`http(s).request`
+读 env 代理）。它是**必需**的（不设则 `fetch` 直接 `fetch failed`），但和「库自己做代理」会撞车：
+
+- **机制**：axios 自带 env 代理解析，会把请求发成 `http://star-proxy:3128` + 绝对 URL 的
+  **正向代理**格式；而该开关让 Node 把「到代理的这条连接」**再套一层代理** → 代理收到自己
+  发给自己的请求，**永不响应**，只能等超时。已在最底层证实：裸 `http.request` 到代理
+  带开关 8s 超时、不带开关 `200 / 396ms`。
+- **`no_proxy` 加代理主机名不管用**（实测无效），不要走这条路。
+- **规则**：本项目所有走代理的 HTTP 客户端，一律**显式 `HttpsProxyAgent` + `proxy: false`**，
+  由 agent 独家负责 CONNECT 隧道，绕开库的 env 解析 → 对该开关免疫（两种 env 下都通）。
+  见 `axios-lark-client.js` 的 `buildHttp()` 与 `feishu-listener.js` 的 `buildWsHttpInstance()`。
+- **第三方 SDK 要看它内部还有没有第二条 HTTP 路径**：Lark `WSClient` 的构造参数 `agent`
+  **只给 WebSocket**，建连前协商网关地址（`pullConnectConfig`）用的是 SDK 自带 axios 实例，
+  必须另传 `httpInstance` 才能覆盖。2026-08-13 线上故障就是漏了它 —— 卡片能发出（发卡走
+  axios-lark-client，已 `proxy:false`）但**回调永远收不到**，飞书侧显示
+  「目标回调服务器未在线」，日志刷 `timeout of 15000ms exceeded` + 每 300s 僵尸重建。
+  自造 `httpInstance` 时必须复刻 SDK `defaultHttpInstance` 的响应拦截器（SDK 直接把
+  返回值当 body 用），否则解构 `data.URL` 会炸。回归测试见
+  `tests/apps/feishu-ws-proxy.test.js`。
+- **排查抓手**：`timeout of 15000ms exceeded` 这个措辞是 **axios** 的，不是 ws 的 —— 见到它
+  要先怀疑「某个 axios 请求走了 env 代理解析」，而不是网络不通。快速判定：
+  `env -u NODE_USE_ENV_PROXY node <同样请求>` 若立刻通，就是这个坑。
+
+

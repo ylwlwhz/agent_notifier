@@ -49,6 +49,34 @@ function buildProxyAgent() {
     }
 }
 
+// WSClient 建连前要先 POST /callback/ws/endpoint 协商网关地址（SDK pullConnectConfig），
+// 这一步走的是 SDK 自带的 axios 实例 —— 构造参数里的 `agent` **只给 WebSocket**，够不到它。
+// ⚠️ 该请求在本机会被「双重代理」打死：axios 自带的 env 代理解析会把请求发成
+// `http://star-proxy:3128` + 绝对 URL 的**正向代理**格式，而 NODE_USE_ENV_PROXY=1 让 Node
+// 内核**又**把这个到代理的连接再套一层代理 → 代理收到自己发给自己的请求，永不响应，
+// 15s 后 `timeout of 15000ms exceeded`，长连接永远建不起来（飞书侧显示「目标回调服务器未在线」）。
+// 修法：自带一个显式 agent + `proxy: false` 的 axios 实例（与 axios-lark-client 同款思路），
+// 由 HttpsProxyAgent 单独负责 CONNECT 隧道，绕开 axios 的 env 解析，从而不受该 Node 开关影响。
+// 必须复刻 SDK defaultHttpInstance 的两个拦截器：SDK 直接把 response 当 body 用（响应拦截器
+// 里 `return resp.data`），少了它 `pullConnectConfig` 解构 `data.URL` 会炸。
+// 返回 undefined 表示无代理，交回 SDK 默认实例（不影响可直连飞书的环境）。
+function buildWsHttpInstance() {
+    const agent = buildProxyAgent();
+    if (!agent) return undefined;
+    const axios = require('axios');
+    const instance = axios.create({ httpAgent: agent, httpsAgent: agent, proxy: false });
+    instance.interceptors.request.use((req) => {
+        if (req.headers) req.headers['User-Agent'] = 'oapi-node-sdk/1.0.0';
+        return req;
+    }, undefined, { synchronous: true });
+    instance.interceptors.response.use((resp) => (
+        resp.config['$return_headers']
+            ? { data: resp.data, headers: resp.headers }
+            : resp.data
+    ));
+    return instance;
+}
+
 class FeishuListener {
     /**
      * @param {object} [opts]
@@ -170,6 +198,8 @@ class FeishuListener {
             appSecret: this.appSecret,
             loggerLevel: Lark.LoggerLevel.info,
             agent: buildProxyAgent(),
+            // agent 只管 WS 本身；网关地址协商那个 HTTP 请求要靠这个实例，见 buildWsHttpInstance
+            httpInstance: buildWsHttpInstance(),
         });
 
         // Start WebSocket connection
@@ -849,6 +879,7 @@ class FeishuListener {
             appSecret: this.appSecret,
             loggerLevel: Lark.LoggerLevel.info,
             agent: buildProxyAgent(),
+            httpInstance: buildWsHttpInstance(), // 同上：重建时也要带，否则重连全部超时
         });
         this.wsClient.start({ eventDispatcher: this.eventDispatcher });
         this.lastEventTime = Date.now();
