@@ -1,6 +1,7 @@
 const HOSTS = Object.freeze({
   CLAUDE: 'claude',
   CODEX: 'codex',
+  CURSOR: 'cursor',
 });
 
 const EVENT_TYPES = Object.freeze({

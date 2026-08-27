@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "afterAgentResponse",
+  "conversation_id": "conv-9f8e7d6c5b4a",
+  "generation_id": "gen-0003",
+  "model_id": "claude-opus-5",
+  "cursor_version": "1.7.2",
+  "workspace_roots": ["/Users/dev/code/agent_notifier"],
+  "text": "已修好登录跳转：把 redirect 的默认值改成了当前 origin，并补了一条回归测试。"
+}

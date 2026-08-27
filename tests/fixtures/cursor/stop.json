@@ -1,0 +1,10 @@
+{
+  "hook_event_name": "stop",
+  "conversation_id": "conv-9f8e7d6c5b4a",
+  "generation_id": "gen-0003",
+  "model_id": "claude-opus-5",
+  "cursor_version": "1.7.2",
+  "workspace_roots": ["/Users/dev/code/agent_notifier"],
+  "status": "completed",
+  "loop_count": 0
+}

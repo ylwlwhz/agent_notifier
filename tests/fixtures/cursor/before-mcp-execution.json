@@ -1,0 +1,13 @@
+{
+  "hook_event_name": "beforeMCPExecution",
+  "conversation_id": "conv-9f8e7d6c5b4a",
+  "generation_id": "gen-0001",
+  "model_id": "claude-opus-5",
+  "cursor_version": "1.7.2",
+  "workspace_roots": ["/Users/dev/code/agent_notifier"],
+  "tool_name": "create_issue",
+  "tool_input": "{\"title\":\"修复登录跳转\",\"team\":\"core\"}",
+  "mcp_server_name": "linear",
+  "mcp_server_url": "https://mcp.linear.app/sse",
+  "url": "https://mcp.linear.app/sse"
+}

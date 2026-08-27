@@ -1,6 +1,6 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-# Agent Notifier — Claude / Codex CLI 飞书通知助手
+# Agent Notifier — Claude / Codex CLI / Cursor 飞书通知助手
 
 > 把 AI 编程助手的所有交互搬到飞书，手机上就能批准、选方案、输指令，多终端同步，不用盯着终端。
 
@@ -8,7 +8,7 @@
 
 | 痛点 | 本项目的解法 |
 |------|-----------|
-| Claude / Codex 等权限、要确认，你必须守在终端前 | 飞书卡片实时推送，手机 / 电脑 / 平板任意设备点一下就行 |
+| Claude / Codex / Cursor 等权限、要确认，你必须守在终端前 | 飞书卡片实时推送，手机 / 电脑 / 平板任意设备点一下就行 |
 | 想在手机上也能操作，但没有官方 App | 飞书就是你的多端 App，iOS / Android / Mac / Windows / Web 全覆盖 |
 | 自建推送要服务器、域名、备案？ | 飞书长连接模式，不需要公网 IP 和域名，本机直连 |
 | 企业审批流程繁琐？ | 飞书企业自建应用秒审批，个人也能用，完全免费 |
@@ -67,6 +67,9 @@
 | 任务完成 | 🟢 绿色 | 摘要、时长、Token + 输入框 |
 | 异常退出 | 🔴 红色 | 错误详情 + 输入框 |
 | 实时执行摘要 | 🔵 蓝色 | 同一任务原地 patch 更新 |
+| Cursor 审批 | 🟠 橙色 | 允许 / 拒绝 / 交回本地 + 拒绝理由输入框 |
+| Cursor 完成 | 🟢 绿色 | 摘要 + 输入框（回话即让 Cursor 自动续跑） |
+| Cursor 实时摘要 | 🟣 靛蓝 | 工具折叠面板，同一轮原地 patch |
 
 ---
 
@@ -74,7 +77,78 @@
 
 **通知能力** — 飞书交互式卡片 / 任务完成与失败通知 / 实时执行摘要 / 会话时长与 Token 统计 / 本地语音提醒
 
-**交互能力** — 按钮点击回流终端 / 文本输入回流终端 / 多终端并行路由 / Claude 与 Codex 共用一套入口
+**交互能力** — 按钮点击回流 / 文本输入回流 / 多终端并行路由 / Claude、Codex、Cursor 共用一套飞书入口
+
+---
+
+## 三个宿主的机制差异
+
+三个宿主的"远程控制"走的是**两条完全不同的路**，这决定了你会遇到什么问题：
+
+| | Claude | Codex CLI | Cursor |
+|---|---|---|---|
+| 事件来源 | Claude hooks | PTY 输出 + session 文件 | Cursor hooks |
+| 回流通道 | 往终端注入按键 | 往终端注入按键 | **hook 直接返回裁决** |
+| 需要 shell 包装函数 | 是（`claude()`） | 是（`codex()`） | **否** |
+| 需要 pty-relay | 是（非 tmux 时） | 是（非 tmux 时） | **否** |
+| 适用范围 | 终端里的 Claude Code | 终端里的 Codex CLI | Cursor IDE 与 CLI |
+
+**为什么 Cursor 不一样**：Cursor 的 hook 是**阻塞式**进程 —— Cursor 把事件 JSON 写进 hook
+的 stdin，然后**等** hook 在 stdout 上回一段 JSON 来决定下一步怎么走。于是「远程批准一条命令」
+变成了「让 hook 进程等你在飞书上点一下，再把 `permission` 回给 Cursor」，既不用猜终端在哪，
+也不存在按键被吞、方向键错乱这类注入问题。
+
+代价是必须保证**永不把 Cursor 永久挂住**：本项目所有等待都有超时，超时后自动回落到
+Cursor 自己的确认弹窗。
+
+### Cursor 有两条链路，按「谁拥有会话」分工
+
+hooks 只是旁路观察者，够不到 IDE 里已存在的会话（往里注入用户消息的唯一入口是 `stop` 的
+`followup_message`，只在一轮结束的瞬间存在）。所以要想像 Claude 那样**随时**回话，
+必须让会话由本仓库自己拥有：
+
+| | IDE 里手工开的会话 | 飞书发 `cursor` 起的会话 |
+|---|---|---|
+| 走哪条链路 | hooks（`cursor-hook.js`） | cursor-agent CLI（`cursor-cli.js`） |
+| 通知卡 | ✅ 完成 / 失败 / 实时摘要 | ✅ 一轮一张，流式 patch |
+| 远程审批 | ✅ 阻塞等你点 | 默认自动放行（无人值守） |
+| **随时回话** | ❌ 只有一轮结束的瞬间 | ✅ **任何时候**，无超时 |
+| 执行中发指令 | ❌ | ✅ 自动排队，本轮结束后接着跑 |
+
+两条链路互不干扰，装好后都能用。
+
+#### IDE 里的「选择题」为什么要特殊处理
+
+IDE 的交互式选择题（`AskQuestion`）是个死角：它**不触发任何 hook**，也**不结束本轮**，
+所以完成卡不会发 —— 人在外面既看不到问题也无法回答，会话就那么静止着。官方 18 个事件里
+没有任何一个对应「agent 正在等用户回答」，事后无从补救。
+
+所以本仓库的做法是**绕开它**：`sessionStart` 时注入一条约定（唯一能改变 agent 行为的官方
+注入点），让它需要你做决定时把选项编号写进正文并结束本轮 —— 问题于是落到完成卡上，
+那张卡的输入框本来就能远程作答。开关 `CURSOR_STEER_QUESTIONS`（默认开），只对**新建**会话生效。
+
+万一它还是用了选择题，`cursor-stall-watch` 看门狗会在静止超过 3 分钟（`CURSOR_STALL_ALERT_SEC`）
+时发一张「疑似在等你确认」的提醒卡，叫你回 IDE。那张卡不带输入框 —— 此时没有任何 hook
+在等待，摆一个只会骗人。
+
+#### 用 Remote-SSH 连服务器的会话
+
+**Cursor Remote-SSH 的 agent 运行时整个跑在远程机上，hooks 也在那边执行**，本机的
+`~/.cursor/hooks.json` 对这类窗口完全不生效 —— 默认一条飞书都收不到。要让它们发卡，
+必须把本仓库和 hook 装到远程机，并在远程 `.env` 里配好 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`
+（远程 hook 是自己直接发卡的）：
+
+```bash
+# 在远程机上（只装只读事件）
+npm run cursor:hooks:notify-only
+```
+
+远程一律用 `--notify-only`：审批/续写是阻塞链路，要求发卡的 hook 与收回调的 listener 能碰到
+同一份决策文件，而 listener 在本机、hook 在远程，碰不上。**也不要在远程再起一个 listener** ——
+飞书对同一个 app 的多条长连接是随机投递的，多一个就会随机吞掉你的点击（见「多端共用一个飞书 App」）。
+
+远程机的 `.env` 建议加上 `AGENT_NOTIFIER_MACHINE=<ssh Host 别名>`，卡片落款会显示 `📍 GY_2`，
+否则同一个群里本机和几台远程机的卡片分不清是哪台。
 
 ---
 
@@ -111,6 +185,7 @@ bash install.sh
 - 安装 Node.js 依赖
 - 从 `.env.example` 创建 `.env`（如不存在）
 - 写入 Claude Code hooks 到 `~/.claude/settings.json`
+- 写入 Cursor hooks 到 `~/.cursor/hooks.json`（只增删本项目的条目，你自己的 hook 会保留）
 - **配置 statusLine**（拷贝跨平台 `scripts/statusline.sh` 到 `~/.claude/`，接入 `cost-capture.js` 抓官方成本/时长/上下文）
 - 注入 `claude` / `codex` shell 包装函数（zsh 写 `~/.zshenv`；bash 写 login 文件 `~/.bash_profile`（无则 `~/.profile`）**和** `~/.bashrc` 各一份 — 仅写 `.bashrc` 不够，多数发行版默认 `.bashrc` 对非交互 shell 提前 return，故函数必须直接进 login 文件，保证 `claude-remote-shell` 的 `bash -l -c` 非交互 login 也能拉起 PTY 中继）
 - **安装 claude-remote-shell**（从官方仓库拉取脚本到 `~/.local/bin`；mutagen 需另装）
@@ -134,6 +209,29 @@ claude
 codex
 ```
 
+Cursor 不需要包装函数，也不需要重开终端 —— hooks 装好后直接用 Cursor 即可，
+任务完成 / 工具失败 / 实时摘要的卡片会自动推到飞书。
+
+### 6.（可选）打开 Cursor 远程控制
+
+通知类开箱即用；**控制类默认关闭**，因为它们会真的把 Cursor 挂住等你拍板 —— 你坐在电脑
+前时会莫名卡住（`beforeShellExecution` 对每条命令都触发，包括本来会被自动放行的 `ls`）。
+
+想要远程控制就编辑 `.env`：
+
+```bash
+# 在飞书上批准 / 拒绝 Shell 与 MCP 调用
+CURSOR_REMOTE_APPROVAL=1
+# 强烈建议配 matcher，只对危险命令要审批，否则每条命令都要点一次
+CURSOR_APPROVAL_MATCHER=rm\s+-rf|git push|npm publish|kubectl|terraform
+
+# 任务结束后在飞书上直接发下一条指令，Cursor 会自动开下一轮
+CURSOR_REMOTE_FOLLOWUP=1
+```
+
+然后重跑 `bash install.sh`（`hooks.json` 里的 `timeout` 要跟着超时配置一起更新，
+否则 Cursor 会在你还没回应时就把 hook 杀掉）。
+
 ---
 
 ## 卸载
@@ -146,8 +244,9 @@ bash uninstall.sh
 - 停止并移除飞书监听器服务（launchd / systemd / crontab）
 - 终止后台进程（feishu-listener、codex-watcher、codex-session-watcher、pty-relay）
 - 从 `~/.claude/settings.json` 移除 hooks
+- 从 `~/.cursor/hooks.json` 移除本项目注入的 hooks（你自己的条目不动）
 - 从 `~/.zshenv` / `~/.zshrc` / `~/.bashrc` / `~/.bash_profile` / `~/.profile` 移除 shell 函数注入
-- 清理运行时文件（session-state、pid、log、/tmp 缓冲文件）
+- 清理运行时文件（session-state、pid、log、/tmp 缓冲文件、决策交汇目录）
 
 > `.env` 和 `node_modules/` 会保留，如需完全清除请手动删除。
 
@@ -199,15 +298,22 @@ FEISHU_APP_SECRET=your_app_secret_here
 # 显式指定 tmux pane（可选）
 # CLAUDE_TMUX_TARGET=claude:0.0
 
-# 实时摘要（可选）
+# 实时摘要（可选，三个宿主共用）
 # FEISHU_LIVE_CAPTURE=1
 # FEISHU_LIVE_DEBOUNCE_MS=3000
+
+# Cursor 远程控制（默认关闭，见下表）
+# CURSOR_REMOTE_APPROVAL=1
+# CURSOR_APPROVAL_MATCHER=rm\s+-rf|git push|npm publish
+# CURSOR_REMOTE_FOLLOWUP=1
 
 NOTIFICATION_ENABLED=true
 # NOTIFICATION_EXPIRE_HOURS=12
 # ENABLE_ESC_BUTTON=true
 SOUND_ENABLED=true
 ```
+
+完整可用项见 `.env.example`（里面每一项都注明了为什么这样默认）。
 
 ### `FEISHU_LIVE_CAPTURE` 的含义
 
@@ -218,7 +324,85 @@ SOUND_ENABLED=true
 - `results`：工具执行结果摘要
 - 也可以组合：`tools,output,results`
 
-Codex 的输出来自 `~/.codex/sessions/*.jsonl`，不是靠终端文本猜测。
+三个宿主共用这一套语义。Codex 的输出来自 `~/.codex/sessions/*.jsonl`，Cursor 的直接来自
+hook payload（`postToolUse` 自带 `tool_input` / `tool_output`），都不靠终端文本猜测。
+
+### Cursor 专属配置
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `CURSOR_NOTIFY_ENABLED` | `1` | 总开关，关掉则 Cursor 相关卡片全不发 |
+| `CURSOR_NOTIFY_STOP` | `1` | 任务结束发完成卡 |
+| `CURSOR_NOTIFY_FAILURE` | `1` | 工具失败发失败卡（用户主动中断不算失败） |
+| `CURSOR_REMOTE_APPROVAL` | `0` | **远程审批**：飞书上批准 / 拒绝 Shell 与 MCP 调用 |
+| `CURSOR_APPROVAL_TIMEOUT_SEC` | `180` | 审批等待上限，超时回落到 Cursor 本地弹窗 |
+| `CURSOR_APPROVAL_MATCHER` | 空 | JS 正则，只对匹配的命令要审批（空=全部都问，很吵） |
+| `CURSOR_APPROVAL_MCP_MATCHER` | 空 | 只对匹配的 `<服务名>.<工具名>` 要审批 |
+| `CURSOR_APPROVE_TOOLS` | 空 | `preToolUse` 网关的工具白名单（需手工加 hook） |
+| `CURSOR_REMOTE_FOLLOWUP` | `0` | **远程续写**：任务结束后在飞书发下一条指令 |
+| `CURSOR_FOLLOWUP_TIMEOUT_SEC` | `300` | 续写等待上限，超时则本轮就地结束（可设到小时级，见下） |
+| `CURSOR_FOLLOWUP_STATUSES` | `completed` | 哪些结束状态才等你续写 |
+| `CURSOR_STOP_LOOP_LIMIT` | `50` | 单会话最多自动续写多少轮 |
+
+> ⚠️ 改了任何 `CURSOR_*_TIMEOUT_SEC` 之后要重跑 `install.sh`（或 `npm run cursor:hooks`）
+> —— `hooks.json` 的 `timeout` 必须大于我们自己的等待上限，否则 Cursor 会提前把 hook 杀掉，
+> 你只会看到"点了没反应"。
+
+#### 想要"隔很久再回话"（小时级等待）
+
+把续写等待调到小时级是支持的，例如 12 小时：
+
+```bash
+CURSOR_REMOTE_FOLLOWUP=1
+CURSOR_FOLLOWUP_TIMEOUT_SEC=43200   # 12h
+NOTIFICATION_EXPIRE_HOURS=24        # 必须大于等待时长，否则卡片会先过期
+```
+
+改完跑 `npm run cursor:hooks`（它会同步 `hooks.json` 的 `timeout`，并在
+`NOTIFICATION_EXPIRE_HOURS` 配小了时报警）。
+
+这条路上有三个坑已经处理好了，不用你操心，但值得知道它们存在：
+
+- 决策请求会记下自己的截止时间，listener 的按龄清理不会把还在等的请求误删
+- 等待方会做存活探测（记 pid + hostname）：你关掉 Cursor 后再点卡片，会明确告诉你
+  "本次点击未生效"，而不是假报成功
+- 轮询在最初 30 秒后从 120ms 退到 1s，12 小时不会白烧 syscall
+
+**代价**：等待期间该会话一直挂着，IDE 里看起来像还在干活。人在电脑前想立刻收尾，
+点卡片上的「结束本轮」即可。
+
+> 如果你要的是「彻底不受这个瞬时窗口限制」，那就用下面的「飞书发起的 Cursor 会话」——
+> 那条路没有超时，输入框永远有效。
+
+### Cursor CLI 会话：真正的随时回复
+
+装好并登录 CLI（一次即可，浏览器登录，**不需要 API key**）：
+
+```bash
+curl https://cursor.com/install -fsS | bash
+~/.local/bin/agent login
+```
+
+然后在飞书里发 `cursor`（或在任意卡片的输入框里输 `/cursor`），选一个项目，就得到一个
+**由本仓库拥有**的 Cursor 会话：
+
+- 一轮一张卡，执行中流式 patch，结束定稿为绿色完成卡
+- 输入框**全程有效**，任何时候回一句就继续下一轮，没有超时
+- 执行中发的指令会**排队**，卡片上显示排队条数，本轮结束后自动发出
+- footer 带模型与 token 统计
+
+相关配置（都可不填，见 `.env.example`）：
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `CURSOR_AGENT_BIN` | 自动探测 | `agent` 可执行路径。listener 由 launchd 拉起时 PATH 不含 `~/.local/bin`，所以按绝对路径探测 |
+| `CURSOR_CLI_MODEL` | 账号默认 | 指定模型 |
+| `CURSOR_CLI_FORCE` | `1` | 自动放行工具调用。设 0 会让 agent 停下等批准 —— 无人值守场景等于挂死 |
+| `CLAUDE_LAUNCH_DIR` | `~/coderepo` | 项目列表根目录（与 Claude 共用） |
+
+**这条路不解决的事**：它管不到你在 IDE 里手工开的会话（那种只能走上面的 hooks 方案）。
+另外飞书发起的会话是 headless 的，agent 没人可问，所以不会再弹选择题 —— 你不会收到
+选择卡，但也不会被卡住。
 
 ---
 
@@ -316,6 +500,24 @@ npm run codex-watcher:start
 npm run codex-watcher:stop
 ```
 
+### Cursor 相关
+
+```bash
+npm run cursor:hooks           # 幂等写入 ~/.cursor/hooks.json
+npm run cursor:hooks:remove    # 只移除本项目注入的条目
+npm run cursor:e2e:cards       # 真机验证：发全部卡片并真的阻塞等你点
+npm run cursor:e2e:approval    # 只验审批链路
+npm run cursor:e2e:followup    # 只验续写链路
+```
+
+飞书里的入口：
+
+- 发 `cursor`，或任意卡片输入框输 `/cursor` → 弹项目菜单，起一个可随时回话的会话
+- 发 `claude`，或输 `/new` → 原有的 Claude 启动菜单
+
+Cursor 只依赖 `feishu-listener` 这一个常驻进程：hooks 由 Cursor 自己按需拉起，
+CLI 会话由 listener 按需 spawn。
+
 ---
 
 ## 架构概览
@@ -326,7 +528,54 @@ npm run codex-watcher:stop
 ### Codex 链路
 - `pty-relay.py` 建立终端桥接 → `src/apps/codex-watcher.js` 负责交互卡 → `src/apps/codex-session-watcher.js` 读取 session 文件 → `src/apps/codex-live.js` 负责实时摘要卡
 
-### 终端注入方式
+### Cursor 链路 A：hooks（管 IDE 里的会话）
+
+走的是「阻塞式 hook + 决策交汇点」，全程不碰终端：
+
+```
+Cursor ──事件 JSON──▶ cursor-hook-handler.js
+                          │
+                          ├─ 发飞书卡（审批 / 完成）
+                          ├─ 在 /tmp/agent-notifier-decisions 登记待决策请求
+                          └─ 阻塞等待……
+                                       ▲
+你在飞书上点一下 ──▶ feishu-listener ──┘ 写入裁决
+                          │
+Cursor ◀──stdout JSON──────┘  permission: allow/deny/ask
+                              followup_message: "下一步做这个"
+```
+
+- 事件翻译：`src/adapters/cursor/hook-adapter.js`
+- 控制策略（开关、matcher、超时回落）：`src/adapters/cursor/control-policy.js`
+- 卡片：`src/apps/cursor-cards.js`，主流程：`src/apps/cursor-hook.js`
+- 实时摘要：`src/apps/cursor-live.js`（轮次边界用 `generation_id`，同轮 patch 同一张卡）
+- 交汇点：`src/lib/decision-bridge.js`（固定落在 `/tmp`，因为 macOS 的 `TMPDIR`
+  是按会话分配的，IDE 拉起的 hook 与 launchd 拉起的 listener 会拿到不同目录）
+
+### Cursor 链路 B：cursor-agent CLI（管飞书发起的会话，可随时回话）
+
+```
+飞书发 cursor / 输 /cursor
+        │
+        ▼
+ listener 列项目 → 自己生成 UUID 作会话 id → 存进 session-state
+        │
+        ▼
+ agent -p --trust --resume <uuid> --workspace <proj> --output-format stream-json "<指令>"
+        │
+        ├─ stream-json 事件流 → 一轮一张卡，节流 patch
+        └─ result 事件      → 定稿为绿色完成卡，输入框保留
+
+任意时刻在输入框回话 → 同一个 uuid resume → 上下文完整延续（无超时）
+执行中回话           → 排队，本轮结束后自动发出
+```
+
+- CLI 封装与 stream-json 解析：`src/adapters/cursor/cli-session.js`
+- 会话生命周期、排队、卡片编排：`src/apps/cursor-cli.js`
+- 关键点：会话 id 由我们生成（CLI 对未知 id 会静默新建，正好被利用成「从诞生起就拥有」）；
+  子进程强制 `CURSOR_NOTIFY_ENABLED=0`，否则同一轮会既发 CLI 卡又发 hook 卡
+
+### 终端注入方式（仅 Claude / Codex）
 
 飞书输入想要真正送回 Claude / Codex，本项目支持多种方式：
 
@@ -340,7 +589,9 @@ npm run codex-watcher:stop
 
 ### Hook 配置
 
-使用 `install.sh` 会自动完成，手动配置写入 `~/.claude/settings.json`：
+使用 `install.sh` 会自动完成。
+
+**Claude** 写入 `~/.claude/settings.json`：
 
 ```json
 {
@@ -352,6 +603,26 @@ npm run codex-watcher:stop
   }
 }
 ```
+
+**Cursor** 写入 `~/.cursor/hooks.json`（`timeout` 由 `.env` 里的超时配置算出来，
+必须大于我们自己的等待上限）：
+
+```json
+{
+  "version": 1,
+  "hooks": {
+    "beforeShellExecution": [{ "command": "node /path/to/cursor-hook-handler.js", "timeout": 210 }],
+    "beforeMCPExecution":   [{ "command": "node /path/to/cursor-hook-handler.js", "timeout": 210 }],
+    "stop":                 [{ "command": "node /path/to/cursor-hook-handler.js", "timeout": 330, "loop_limit": 50 }],
+    "afterAgentResponse":   [{ "command": "node /path/to/cursor-hook-handler.js", "timeout": 30 }],
+    "postToolUse":          [{ "command": "node /path/to/cursor-hook-handler.js", "timeout": 30, "matcher": "Shell|Write|StrReplace|Edit|Delete|EditNotebook" }],
+    "postToolUseFailure":   [{ "command": "node /path/to/cursor-hook-handler.js", "timeout": 30 }]
+  }
+}
+```
+
+`preToolUse`（按工具名网关）和 `subagentStop`（子代理续写）也已实现，但默认不注册 ——
+它们对每个工具调用 / 每个子代理都触发，太吵。需要时手工加进上面这份配置。
 
 ---
 
@@ -365,21 +636,36 @@ python3 -m py_compile pty-relay.py
 # 发测试卡
 node scripts/send-codex-feishu-test-cards.js --pts /dev/pts/<N>
 npm run ask:e2e:card
+npm run cursor:e2e:cards       # Cursor：真的阻塞等你点，点一下就验完整条链路
 ```
 
 建议至少手动验证：
 - Claude 完成卡发送是否正常
 - Codex 文本输入 / 审批 / 单选 / 多选是否都能回流
 - Codex live 卡是否同任务 patch、新任务 create
+- Cursor 审批卡点「允许 / 拒绝」后，Cursor 那边是否真的放行 / 拦下，原卡是否收敛成「已处理」
+- Cursor 完成卡里回一句话，Cursor 是否自动开了下一轮
 - 长文本是否被正确分块
+
+Cursor 专项检查（改了 `cursor-hook.js` 必做）：
+
+```bash
+# stdout 是给 Cursor 读的裁决通道，必须只有纯净 JSON
+node cursor-hook-handler.js < tests/fixtures/cursor/stop.json 2>/dev/null | od -c
+# 期望：{  }  \n  ——多任何一个字节，Cursor 都会把整段输出判为无效 JSON
+```
 
 ---
 
 ## 注意事项
 
-- PTY raw mode 下 Enter 是 `\r`，不是 `\n`
+- PTY raw mode 下 Enter 是 `\r`，不是 `\n`（仅 Claude / Codex 的注入路径）
 - 完成类卡片会带输入框，方便直接续聊
 - `im.message.patch` 会丢失输入框，所以完成卡通常新建，执行中卡使用 patch
+- Cursor 的实时摘要卡**故意不带输入框** —— 运行中的 Cursor 没有可回流的输入通道，
+  唯一入口是任务结束时的完成卡，摆个点了没反应的输入框只会骗人
+- Cursor 的一切等待都有超时兜底，绝不会把 Cursor 永久挂住
+- 同一个飞书应用只能有**一个** listener 在线，多开会导致回调被随机分发（表现为随机「已过期」）
 - 敏感配置放在 `.env`，不要提交
 
 ---
@@ -392,6 +678,7 @@ npm run ask:e2e:card
 - `src/apps/claude-hook.js`
 - `src/apps/codex-live.js`
 - `src/apps/codex-watcher.js`
+- `src/apps/cursor-hook.js` + `src/lib/decision-bridge.js`（Cursor 阻塞式控制的核心）
 - `src/channels/feishu/feishu-interaction-handler.js`
 
 ---

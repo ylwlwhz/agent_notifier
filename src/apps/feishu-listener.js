@@ -17,9 +17,12 @@ const { injectKeys, injectText } = require('../lib/terminal-inject');
 const { createFeishuClient } = require('../channels/feishu/feishu-client');
 const { createFeishuInteractionHandler } = require('../channels/feishu/feishu-interaction-handler');
 const { createCodexInputBridge } = require('../adapters/codex/cli-input-bridge');
+const { decisionBridge } = require('../lib/decision-bridge');
 const { selectCard, card2, inputEl, escFooterRow, footer } = require('../lib/card');
 const { parseMarkdownToElements } = require('../lib/feishu-card-utils');
 const launcher = require('./launcher');
+const cursorCards = require('./cursor-cards');
+const cursorCli = require('./cursor-cli');
 
 // 默认 0 = 不做定期强制重建。每次 close→start 都会在飞书服务端留下短暂的“僵尸注册”，
 // 期间事件被随机路由到僵尸连接 → 用户点击要靠运气（实测“点 2-3 次才成功一次”）。
@@ -42,6 +45,13 @@ const INJECT_TOAST_DEADLINE_MS = parseInt(process.env.FEISHU_INJECT_TOAST_DEADLI
 // _settleWithin 的超时哨兵：用唯一对象，免得与注入结果（undefined / 字符串 / {toast}）撞上
 const TIMED_OUT = Symbol('inject-toast-timeout');
 
+// 「已收到」卡的宿主标签（rule §3：卡片必须能区分宿主）
+const HOST_TAGS = {
+    claude: { text: 'Claude', color: 'blue' },
+    codex: { text: 'Codex', color: 'purple' },
+    cursor: { text: 'Cursor', color: 'indigo' },
+};
+
 class FeishuListener {
     /**
      * @param {object} [opts]
@@ -53,10 +63,15 @@ class FeishuListener {
      *   injectKeys/injectText route the keystrokes into the owning container via
      *   `docker exec` (see terminal-inject injectViaContainer). pts_device itself
      *   stays clean for display/state; only the injection target is wrapped.
+     * @param {object} [opts.decisions]
+     *   decision bridge used for Cursor cards. Cursor has no terminal to inject
+     *   into — its hook process is blocked waiting for a verdict file, so the
+     *   listener answers by writing that file instead of sending keystrokes.
      */
     constructor(opts = {}) {
         this.state = opts.state || new SessionState();
         this.injectTargetFor = opts.injectTargetFor || null;
+        this.decisions = opts.decisions || decisionBridge;
         this.lastEventTime = Date.now();
         this._lastServerActivity = Date.now(); // 任何服务端消息（事件/ping/pong）都刷新
         this._hookedWs = null;                 // 已挂 message 监听的底层 ws 实例
@@ -179,9 +194,11 @@ class FeishuListener {
         // Periodic health check for WebSocket connection staleness
         this.healthCheckInterval = setInterval(() => this.checkHealth(), HEALTH_CHECK_INTERVAL_MS);
 
-        // Periodic cleanup of expired notifications
+        // Periodic cleanup of expired notifications；decision-bridge 的残留文件
+        // 只会在 hook 进程被 kill（来不及 close）时出现，一并按龄清掉
         this.cleanupInterval = setInterval(() => {
             this.state.cleanExpiredAsync().catch(() => {});
+            try { this.decisions.cleanExpired(); } catch { /* 清理失败不影响主流程 */ }
         }, 60000);
 
         this.warnRivalListeners();
@@ -278,6 +295,15 @@ class FeishuListener {
             return;
         }
 
+        // /cursor 卡片入口：任意卡片输入框输入 `/cursor` → 弹 Cursor 项目菜单。
+        // 与 /new 同理走卡片回调通道，不依赖 im.message.receive_v1 的消息权限。
+        if (action.tag === 'input' && /^\/cursor$/i.test((action.input_value || '').trim())) {
+            const chatId = data?.context?.open_chat_id || await this.resolveChatId();
+            if (!chatId) return { toast: { type: 'error', content: '无法确定会话，请重试' } };
+            await this.sendCursorLaunchMenu(chatId);
+            return '已弹出 Cursor 启动菜单';
+        }
+
         // /new 卡片入口：任意卡片输入框输入 `/new [host]` → 弹启动菜单。
         // 走可靠的 card.action.trigger 通道，绕开飞书消息事件(im.message.receive_v1)的权限限制。
         if (action.tag === 'input') {
@@ -337,9 +363,13 @@ class FeishuListener {
         if (notification._launch) {
             return this.handleLaunch(notification, action_type, session_state_key, action);
         }
+        if (notification._cursor_launch) {
+            return this.handleCursorLaunch(notification, action_type, session_state_key, action);
+        }
 
-        // Check terminal target
-        if (!notification.pts_device) {
+        // Check terminal target。Cursor 例外：它的裁决走 decision-bridge 回传给正在
+        // 阻塞的 hook 进程，本来就没有终端，不能被这道终端检查拦掉。
+        if (notification.host !== 'cursor' && !notification.pts_device) {
             console.log('[feishu-listener] 终端未找到，无法注入');
             return { toast: { type: 'error', content: '未找到目标终端，无法注入' } };
         }
@@ -473,6 +503,15 @@ class FeishuListener {
     _shouldAck(action, action_type, notification) {
         if (['interrupt', 'esc', 'bypass', 'opt_other'].includes(action_type)) return false;
         if (action_type === 'submit_multi') return !!(action?.input_value && action.input_value.trim());
+        if (notification.host === 'cursor') {
+            // CLI 会话不发「已收到」卡：紧随其后就会出现一张「执行中」卡，
+            // 那张卡本身就是最好的回执，再补一张纯属噪音
+            if (notification.notification_type === 'cursor_cli_session') return false;
+            // 「交回本地确认」是控制类操作，不算回复；空提交同理
+            if (action_type === 'local') return false;
+            if (action?.tag === 'input') return !!(action.input_value && action.input_value.trim());
+            return !!notification.responses?.[action_type];
+        }
         if (action?.tag === 'input' && action.input_value) return true; // 文本 / 对话回复
         if (notification.host === 'codex') return true;                  // codex 各类回复
         if (action_type && notification.responses?.[action_type]) return true; // 选项 / 答复按钮
@@ -492,7 +531,6 @@ class FeishuListener {
 
     /** "已收到"卡：带宿主身份 + 回显用户所选 / 所答 + 终端 id（绿色 yes 图标表示已接收） */
     buildReceivedCard(notification, action, action_type) {
-        const isCodex = notification.host === 'codex';
         const detail = this._receivedDetail(notification, action, action_type);
         const elements = [];
         if (detail) elements.push({ tag: 'markdown', content: detail });
@@ -502,7 +540,7 @@ class FeishuListener {
         return card2({
             template: 'blue', // 与执行摘要同色（用户要求）
             title: '已收到',
-            tags: [{ text: isCodex ? 'Codex' : 'Claude', color: isCodex ? 'purple' : 'blue' }],
+            tags: [HOST_TAGS[notification.host] || HOST_TAGS.claude],
             elements,
         });
     }
@@ -531,9 +569,13 @@ class FeishuListener {
         }
     }
 
-    /** Claude 通知 → claude-live 用的 sessionKey（去 claude_ 前缀后 slice(0,8)）；codex/缺失返回 '' */
+    /** Claude 通知 → claude-live 用的 sessionKey（去 claude_ 前缀后 slice(0,8)）。
+     *  仅 Claude 有执行摘要合并流程；其余宿主（codex/cursor）返回 '' 表示不参与。
+     *  注意判定要写成「白名单」：早期写成「!== codex」，新增 cursor 宿主后会误写
+     *  received_msg_cursor_x 这种永远不会被消费的键。 */
     _claudeSessionKey(notification) {
-        if (notification?.host === 'codex') return '';
+        const host = notification?.host || 'claude';
+        if (host !== 'claude') return '';
         const raw = String(notification?.session_id || '').replace(/^claude_/, '');
         return raw ? raw.slice(0, 8) : '';
     }
@@ -541,6 +583,16 @@ class FeishuListener {
     /** 实际把交互注入到终端（codex / 多选 / 文本 / 按钮），返回 toast 文案。
      *  由 handleCardAction 视情况后台执行或同步等待。 */
     async _injectInteraction(data, notification, action, action_type, session_state_key) {
+        if (notification.host === 'cursor') {
+            // 两类 cursor 通知走完全不同的回流通路：
+            //   cursor_cli_session → 本仓库拥有的会话，直接把指令推给 cursor-agent（可随时回）
+            //   其余（审批/续写）  → hook 进程正阻塞等裁决，写 decision-bridge
+            if (notification.notification_type === 'cursor_cli_session') {
+                return this._submitCursorCliPrompt(notification, action, session_state_key);
+            }
+            return this._resolveCursorDecision(notification, action, action_type);
+        }
+
         if (notification.host === 'codex') {
             try {
                 const response = await this.unifiedInteractionHandler.handleCardAction(data);
@@ -725,6 +777,143 @@ class FeishuListener {
     }
 
     /**
+     * Cursor 卡片回调 → 裁决。
+     *
+     * Cursor 不走终端注入：发这张卡的 hook 进程此刻正阻塞在 decision-bridge 上等一个
+     * 回复文件，我们把裁决写进去，它就会读到并原样回给 Cursor（permission /
+     * followup_message）。所以这里既不需要 pts_device，也不存在「注入失败」。
+     */
+    async _resolveCursorDecision(notification, action, action_type) {
+        const decisionId = notification.decision_id;
+        if (!decisionId) {
+            console.log('[feishu-listener] cursor 卡片缺少 decision_id，无法回传');
+            return { toast: { type: 'error', content: '该卡片缺少决策标识，无法回传' } };
+        }
+
+        const resolved = this._cursorDecisionFor(notification, action, action_type);
+        if (!resolved) {
+            console.log('[feishu-listener] cursor 未知操作:', action_type);
+            return;
+        }
+
+        // 写不进去说明 hook 已经不在等了（超时回落 / 已在 IDE 里点过）。
+        // 这时如实告诉用户，别假报成功——他以为放行了、其实 Cursor 早走了别的路。
+        if (!this.decisions.resolve(decisionId, resolved.decision)) {
+            console.log(`[feishu-listener] cursor 裁决无人接收 decision_id=${decisionId}（已超时或已在本地处理）`);
+            return {
+                toast: {
+                    type: 'warning',
+                    content: '⚠️ Cursor 已不在等待这张卡（已超时或已在 IDE 里处理），本次点击未生效',
+                },
+            };
+        }
+
+        console.log(`[feishu-listener] cursor 已回传裁决 ${notification.notification_type}:`,
+            JSON.stringify(resolved.decision).slice(0, 200));
+        return resolved.label;
+    }
+
+    // ── Cursor CLI 会话：飞书发起、可随时回复 ──────────────────────────────
+    //
+    // 与 hooks 那套的本质区别：这类会话由本仓库通过 cursor-agent 拥有，会话 id 在我们手上，
+    // `agent -p --resume <id>` 任何时候都能把消息推进去。所以没有超时、不阻塞、
+    // 输入框全程有效 —— IDE 里手工开的会话做不到这些（见 docs/ai_rules.md）。
+
+    /** 发 Cursor 项目选择菜单 */
+    async sendCursorLaunchMenu(chatId) {
+        const projects = launcher.listLocalProjects();
+        const stateKey = `feishu_cursor_launch_${Date.now()}`;
+        await this.state.addNotificationAsync(stateKey, {
+            host: 'cursor',
+            _cursor_launch: true,
+            chat_id: chatId,
+            items: projects,
+            created_at: Date.now(),
+        });
+        await this.sendCardJson(chatId, cursorCards.buildCliLaunchMenu({
+            projects, stateKey, rootDir: launcher.CODE_DIR,
+        }));
+    }
+
+    /** 菜单回调：opt_N 选项目 / 输入框手填绝对路径 → 建会话并发「就绪」卡 */
+    async handleCursorLaunch(notification, action_type, stateKey, action) {
+        let workspace = null;
+
+        if (action?.tag === 'input' || action_type === 'cursor_launch_path') {
+            const raw = String(action?.input_value || '').trim();
+            if (!raw) return { toast: { type: 'warning', content: '请输入项目路径' } };
+            workspace = raw.startsWith('/') ? raw : require('path').join(launcher.CODE_DIR, raw);
+        } else {
+            const idx = this.menuIndex(action_type);
+            if (idx < 0) return;
+            const name = (notification.items || [])[idx];
+            if (!name) return '选项无效';
+            workspace = require('path').join(launcher.CODE_DIR, name);
+        }
+
+        if (!require('fs').existsSync(workspace)) {
+            return { toast: { type: 'error', content: `路径不存在：${workspace}`.slice(0, 100) } };
+        }
+
+        await this.state.removeNotificationAsync(stateKey);
+        const { stateKey: sessionKey } = await cursorCli.createSession({
+            state: this.state,
+            workspace,
+            chatId: notification.chat_id,
+        });
+
+        await this.sendCardJson(notification.chat_id, cursorCards.buildCliTurnCard({
+            segments: [],
+            status: 'ready',
+            stateKey: sessionKey,
+            projectName: require('path').basename(workspace),
+        }));
+        return '会话已就绪';
+    }
+
+    /** CLI 会话卡的输入框 → 把指令交给 cursor-agent（执行中则排队） */
+    async _submitCursorCliPrompt(notification, action, stateKey) {
+        const prompt = String(action?.input_value || '').trim();
+        if (!prompt) return { toast: { type: 'warning', content: '请输入指令' } };
+
+        const result = await cursorCli.submitPrompt({
+            state: this.state,
+            client: this.client,
+            stateKey,
+            prompt,
+        });
+
+        if (!result.ok) {
+            return { toast: { type: 'warning', content: '⚠️ 该会话已过期，请重新发 /cursor 启动' } };
+        }
+        if (result.queued) {
+            console.log(`[feishu-listener] cursor-cli 已排队（第 ${result.depth} 条）: ${prompt.slice(0, 50)}`);
+            return `已排队（第 ${result.depth} 条），本轮结束后自动发出`;
+        }
+        console.log(`[feishu-listener] cursor-cli 已开跑: ${prompt.slice(0, 50)}`);
+        // 不 await running：一轮可能跑好几分钟，回调必须立刻返回
+        this._lastCursorRun = result.running;
+        return '已发送';
+    }
+
+    /** 按钮 → responses[action_type].decision；输入框 → text_response 描述的字段映射 */
+    _cursorDecisionFor(notification, action, action_type) {
+        if (action?.tag === 'input') {
+            const text = String(action.input_value || '').trim();
+            if (!text) return null;
+            const spec = notification.text_response;
+            if (!spec?.field) return null;
+            return {
+                decision: { ...(spec.extra || {}), [spec.field]: text },
+                label: '已发送',
+            };
+        }
+        const entry = notification.responses?.[action_type];
+        if (!entry || !entry.decision) return null;
+        return { decision: entry.decision, label: entry.label || '已操作' };
+    }
+
+    /**
      * 多问题模式：发送下一题卡片，或最后的提交/取消卡片
      */
     async sendNextQuestion(notification, prevStateKey, lastViaInput = false) {
@@ -835,6 +1024,10 @@ class FeishuListener {
         text = text.replace(/@_user_\d+/g, '').trim(); // 去掉 @机器人 提及占位
         const parts = text.split(/\s+/).filter(Boolean);
         const chatId = msg.chat_id;
+        if (parts[0] === 'cursor') {
+            console.log('[feishu-listener] 启动命令: cursor');
+            return this.sendCursorLaunchMenu(chatId);
+        }
         if (parts[0] !== 'claude') return; // 其余文本忽略，不干扰普通聊天
         const host = parts[1];
         console.log(`[feishu-listener] 启动命令: claude ${host || '(本地)'}`);

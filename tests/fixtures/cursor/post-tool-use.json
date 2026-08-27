@@ -1,0 +1,14 @@
+{
+  "hook_event_name": "postToolUse",
+  "conversation_id": "conv-9f8e7d6c5b4a",
+  "generation_id": "gen-0002",
+  "model_id": "claude-opus-5",
+  "cursor_version": "1.7.2",
+  "workspace_roots": ["/Users/dev/code/agent_notifier"],
+  "tool_name": "Shell",
+  "tool_input": { "command": "npm test" },
+  "tool_output": "{\"exitCode\":0,\"stdout\":\"42 tests passed\",\"stderr\":\"\"}",
+  "tool_use_id": "tu-77",
+  "cwd": "/Users/dev/code/agent_notifier",
+  "duration": 5432
+}

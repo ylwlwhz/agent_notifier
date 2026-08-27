@@ -9,6 +9,10 @@ const HOST_META = Object.freeze({
         label: 'Codex',
         template: 'turquoise',
     },
+    cursor: {
+        label: 'Cursor',
+        template: 'indigo',
+    },
 });
 
 function getHostHeaderMeta(host) {

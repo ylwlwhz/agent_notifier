@@ -231,6 +231,19 @@ if (changed) {
 success "Claude Code Hooks 配置完成"
 echo ""
 
+# ── 4.2 配置 Cursor Hooks ────────────────────────────────
+# Cursor 的 hook 是阻塞式的：hook 在 stdout 上回 JSON 决定 Cursor 下一步怎么走，
+# 所以远程控制不需要 PTY 中继，也不需要 cursor() 包装函数。
+info "正在配置 Cursor Hooks..."
+
+CURSOR_HOOKS_FILE="$HOME/.cursor/hooks.json"
+if AGENT_NOTIFIER_DIR="$INSTALL_DIR" node "$INSTALL_DIR/scripts/setup-cursor-hooks.js"; then
+    success "Cursor Hooks 配置完成（$CURSOR_HOOKS_FILE）"
+else
+    warn "Cursor Hooks 配置失败，可稍后手动运行：node $INSTALL_DIR/scripts/setup-cursor-hooks.js"
+fi
+echo ""
+
 # ── 4.5 配置 statusLine（cost-capture + 跨平台 statusline.sh）──
 info "正在配置 statusLine..."
 
@@ -526,12 +539,18 @@ echo -e "${GREEN}═════════════════════
 echo ""
 info "安装目录: $INSTALL_DIR"
 info "配置文件: $INSTALL_DIR/.env"
-info "Hooks 配置: $SETTINGS_FILE"
+info "Claude Hooks: $SETTINGS_FILE"
+info "Cursor Hooks: $CURSOR_HOOKS_FILE"
 info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）"
 echo ""
 info "后续步骤："
 echo "  1. 编辑 .env 填入飞书配置（如尚未配置）"
 echo "  2. 重新打开终端，或 source ~/.zshenv（zsh）/ ~/.bashrc（bash）加载函数"
 echo "  3. 使用 codex() 包装函数时，可通过 CODEX_BIN 指定可执行名"
+echo ""
+info "Cursor 远程控制默认只开通知，控制类需在 .env 显式打开（会阻塞 Cursor 等你拍板）："
+echo "  CURSOR_REMOTE_APPROVAL=1   飞书上批准/拒绝 Shell 与 MCP 调用"
+echo "  CURSOR_REMOTE_FOLLOWUP=1   任务结束后在飞书上直接发下一条指令"
+echo "  改完超时相关配置后请重跑 install.sh，让 hooks.json 的 timeout 同步"
 echo ""
 success "祝使用愉快！"
