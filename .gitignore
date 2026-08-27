@@ -1,5 +1,7 @@
 # 环境变量文件 - 包含敏感信息
 .env
+# 改 .env 前留的备份带着完整凭据，.gitignore 只精确匹配 .env 是不够的
+.env.bak.*
 .env.local
 .env.production
 .env.development
@@ -51,4 +53,4 @@ __pycache__/
 docs/*
 !docs/images
 !docs/ai_rules.md
-!docs/blog.env.bak.*
+!docs/blog
