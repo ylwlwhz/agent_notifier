@@ -17,6 +17,8 @@
     "cursor:hooks": "node scripts/setup-cursor-hooks.js",
     "cursor:hooks:notify-only": "node scripts/setup-cursor-hooks.js --notify-only",
     "cursor:hooks:remove": "node scripts/setup-cursor-hooks.js --remove",
+    "cursor:mcp": "node scripts/setup-cursor-mcp.js",
+    "cursor:mcp:remove": "node scripts/setup-cursor-mcp.js --remove",
     "cursor:e2e:cards": "node scripts/send-cursor-feishu-test-cards.js",
     "cursor:e2e:approval": "node scripts/send-cursor-feishu-test-cards.js --approval",
     "cursor:e2e:followup": "node scripts/send-cursor-feishu-test-cards.js --followup",
