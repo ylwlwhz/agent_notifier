@@ -120,3 +120,18 @@ test('死锁能被回收：持锁进程已消失时允许重新武装', () => {
     assert.equal(stall.ensureWatcher(key, IDLE), true);
     stall.clearActivity(key);
 });
+
+// ── 抑制规则：已有卡在外面就不叠噪音 ────────────────────────────────────────
+
+test('hasPendingCard：该会话已有待回复的卡时返回 true，用户并非两眼一抹黑', () => {
+    const { decisionBridge } = require('../../src/lib/decision-bridge');
+    const id = 'cursor_stallsuppress_1';
+    decisionBridge.open(id, { session_id: 'cursor_S9', event: 'stop', timeoutMs: 60000 });
+    try {
+        assert.equal(stall.hasPendingCard('cursor_S9'), true);
+        assert.equal(stall.hasPendingCard('cursor_别的'), false);
+        assert.equal(stall.hasPendingCard(''), false, '没有会话 id 时不该乱抑制');
+    } finally {
+        decisionBridge.close(id);
+    }
+});

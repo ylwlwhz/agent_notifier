@@ -16,7 +16,10 @@
 
 const DEFAULT_APPROVAL_TIMEOUT_SEC = 180;
 const DEFAULT_FOLLOWUP_TIMEOUT_SEC = 300;
-const DEFAULT_STALL_ALERT_SEC = 180;
+// 15 分钟而不是 3 分钟：agent 组织长回复或做大上下文思考时【什么事件都不产生】，
+// 3 分钟会在正常长回合里误报（实测踩过）。而这个兜底的价值随 ask_user（MCP 提问工具）
+// 落地已大幅下降，宁可漏报也不该在人干活时乱叫。
+const DEFAULT_STALL_ALERT_SEC = 900;
 
 /**
  * sessionStart 注入的提问形态约定。

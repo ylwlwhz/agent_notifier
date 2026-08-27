@@ -467,3 +467,40 @@ test('trackActivity：每个事件都刷心跳并保证有看门狗，stop 则�
         stall.recordActivity = origRecord;
     }
 });
+
+// ── 同一会话只留一张待回复的卡 ───────────────────────────────────────────────
+
+test('新一轮开始时收敛上一轮遗留的卡，不再攒阻塞进程', async () => {
+    // 实测踩过：24h 等待窗口下每轮结束都留一个阻塞 hook + 一张永久有效的卡，攒到 9 个；
+    // 用户回复旧卡会把续写注入到几小时前就结束的那一轮里
+    const event = translateCursorHook(stopFixture);
+
+    const stale = 'cursor_stale_1';
+    decisionBridge.open(stale, {
+        session_id: event.sessionId, event: 'stop', timeoutMs: 60000,
+    });
+    assert.equal(decisionBridge.isPending(stale), true);
+
+    cursorHook.supersedePrevious(event);
+
+    assert.equal(decisionBridge.isPending(stale), false, '旧卡必须被裁决掉');
+    assert.deepEqual(decisionBridge.read(stale), { superseded: true });
+    decisionBridge.close(stale);
+});
+
+test('收敛只针对同一会话的同类事件，不误伤别的会话', () => {
+    const event = translateCursorHook(stopFixture);
+    const other = 'cursor_other_session';
+    decisionBridge.open(other, { session_id: 'cursor_别的会话', event: 'stop', timeoutMs: 60000 });
+
+    cursorHook.supersedePrevious(event);
+
+    assert.equal(decisionBridge.isPending(other), true, '别人的卡不该被动');
+    decisionBridge.close(other);
+});
+
+test('被取代的卡文案要说清「不再等回复」，别让用户对着它打字', () => {
+    const settled = cursorHook.describeDecision(cards.followupResponses(), { superseded: true });
+    assert.match(settled.text, /已被新一轮取代/);
+    assert.match(settled.text, /不再等待回复/);
+});

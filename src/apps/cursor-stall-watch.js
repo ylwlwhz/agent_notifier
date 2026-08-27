@@ -19,9 +19,12 @@
  * 【一轮结束时】触发（一轮里几十条助手消息都不会触发它），而卡在选择题的那轮永远
  * 不会结束，所以那样写等于永远不告警。
  *
- * 残留误报：agent 长时间「思考」（大上下文 + 高 effort）也可能连续数分钟没有工具调用。
- * 为此额外注册了 `afterAgentThought` 来刷心跳，但思考本身耗时超过阈值时仍会误报一次。
- * 卡片措辞因此一律用「疑似」，代价只是让人瞟一眼。
+ * 残留误报（实测踩过，别把阈值再调小）：agent 组织一段长回复、或做一次大上下文的思考，
+ * 期间【什么事件都不产生】—— 文字要到轮末的 afterAgentResponse 才有信号。3 分钟阈值因此
+ * 会在正常长回合里误报。默认阈值已放到 15 分钟：这个兜底的价值本来就随 ask_user
+ * （MCP 提问工具）的落地而大幅下降了，宁可漏报也不该在人干活时乱叫。
+ *
+ * 另一条抑制规则：该会话已经有一张待回复的卡在外面时不告警 —— 用户并不是两眼一抹黑。
  *
  * 报一次就退出：真被解开了会有新事件重新拉起看门狗，不会连环轰炸。
  */
@@ -104,6 +107,20 @@ function recordActivity(event, { stopped = false } = {}) {
 function clearActivity(sessionKey) {
     for (const file of [activityPath(sessionKey), lockPath(sessionKey)]) {
         try { fs.unlinkSync(file); } catch { /* 不存在即已清理 */ }
+    }
+}
+
+/**
+ * 该会话是否已经有一张待回复的卡在外面（审批 / 续写 / MCP 提问都算）。
+ * 有的话就别再告警：用户手上已经有可操作的东西，多一张「疑似卡住」只是噪音。
+ */
+function hasPendingCard(sessionId) {
+    if (!sessionId) return false;
+    try {
+        const { decisionBridge } = require('../lib/decision-bridge');
+        return decisionBridge.listPending({ sessionId }).length > 0;
+    } catch {
+        return false; // 查不了就当没有，宁可多报一次也不要静默失效
     }
 }
 
@@ -231,6 +248,8 @@ async function watch(sessionKey, idleMs) {
         if (Date.now() > deadline) break;
 
         if (shouldAlert(heartbeat, idleMs)) {
+            // 已经有卡在外面就继续等，不叠一张噪音卡；卡被回应后本轮自然会有新事件
+            if (hasPendingCard(heartbeat.session_id)) continue;
             await sendStallCard(heartbeat, idleMs);
             break;
         }
@@ -265,6 +284,7 @@ module.exports = {
     activityPath,
     lockPath,
     peekLastResponse,
+    hasPendingCard,
     WORK_EVENTS,
     MAX_WATCH_MS,
 };
