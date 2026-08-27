@@ -194,7 +194,31 @@ function appendLive(sessionKey, entry) {
  * 关键顺序：必须【先写 state 再发卡】。反过来会留一个「卡已可点、通知还没落盘」的
  * 竞态窗口（实测 1-5s，就是一次飞书 API 往返），用户手快就会撞上假的「卡片已过期」。
  */
+/**
+ * 同一会话只保留一张待回复的卡：新一轮开始前，把上一轮还挂着的那张收敛掉。
+ *
+ * 等待窗口长达 24h 时，每轮结束都会留下一个阻塞的 hook 进程和一张永久有效的卡。
+ * 实测攒到 9 个（4 小时里每轮一个）—— 进程泄漏之外更糟的是：用户回复某张旧卡，
+ * 续写会被注入到几小时前就结束的那一轮里。
+ *
+ * 写入裁决而不是硬杀进程：老 hook 会自己醒来、把卡片收敛成只读态、再正常退出。
+ */
+function supersedePrevious(event) {
+    try {
+        const stale = decisionBridge.listPending({
+            sessionId: event.sessionId,
+            event: event.meta.eventName,
+        });
+        for (const id of stale) decisionBridge.resolve(id, { superseded: true });
+        if (stale.length) console.error(`[cursor-hook] 已收敛上一轮遗留的 ${stale.length} 张卡`);
+    } catch (err) {
+        console.error('[cursor-hook] 收敛旧卡失败:', err.message);
+    }
+}
+
 async function askFeishu({ event, app, buildCard, buildSettled, responses, textResponse, notificationType, timeoutMs }) {
+    supersedePrevious(event);
+
     const decisionId = newDecisionId('cursor');
     const stateKey = `feishu_cursor_${event.sessionKey}_${Date.now()}`;
 
@@ -262,6 +286,10 @@ async function askFeishu({ event, app, buildCard, buildSettled, responses, textR
 
 /** 裁决 → 收敛卡上的一行状态文案 */
 function describeDecision(responses, decision) {
+    // 被新一轮取代：要说清「这张卡不再等回复」，否则用户几小时后还会对着它打字
+    if (decision?.superseded) {
+        return { text: '↩️ **已被新一轮取代** — 这张卡不再等待回复', template: 'grey' };
+    }
     const matched = Object.values(responses || {}).find(
         (entry) => JSON.stringify(entry.decision) === JSON.stringify(decision)
     );
@@ -475,6 +503,7 @@ module.exports = {
     sendCardDetached,
     askFeishu,
     describeDecision,
+    supersedePrevious,
     trackActivity,
     handleSessionStart,
     handleApproval,

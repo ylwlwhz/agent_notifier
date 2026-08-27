@@ -51,8 +51,9 @@ test('引导文案必须点名 AskQuestion，并给出「正文列选项 + 结�
     assert.match(QUESTION_STEER_CONTEXT, /结束本轮/);
 });
 
-test('卡死告警默认开启，阈值可调', () => {
-    assert.deepEqual(parseCursorControlConfig({}).stall, { enabled: true, idleMs: 180000 });
+test('卡死告警默认开启，阈值默认 15 分钟（3 分钟会在正常长回合里误报）', () => {
+    // agent 组织长回复 / 做大上下文思考时什么事件都不产生，短阈值必然误报 —— 实测踩过
+    assert.deepEqual(parseCursorControlConfig({}).stall, { enabled: true, idleMs: 900000 });
     assert.equal(parseCursorControlConfig({ CURSOR_STALL_ALERT_SEC: '600' }).stall.idleMs, 600000);
     assert.equal(parseCursorControlConfig({ CURSOR_STALL_ALERT: 'off' }).stall.enabled, false);
 });

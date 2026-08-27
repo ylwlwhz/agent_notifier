@@ -244,3 +244,30 @@ test('决策 id 唯一，同毫秒也不碰撞', () => {
     const ids = new Set(Array.from({ length: 200 }, () => newDecisionId('cursor')));
     assert.equal(ids.size, 200);
 });
+
+// ── listPending：支撑「同一会话只留一张待回复的卡」 ──────────────────────────
+
+test('listPending 按 session_id / event 过滤，且只算真正还在等的', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bridge-pending-'));
+    const bridge = new DecisionBridge(dir);
+
+    bridge.open('a', { session_id: 'S1', event: 'stop', timeoutMs: 60000 });
+    bridge.open('b', { session_id: 'S1', event: 'stop', timeoutMs: 60000 });
+    bridge.open('c', { session_id: 'S1', event: 'beforeShellExecution', timeoutMs: 60000 });
+    bridge.open('d', { session_id: 'S2', event: 'stop', timeoutMs: 60000 });
+
+    assert.deepEqual(bridge.listPending({ sessionId: 'S1', event: 'stop' }).sort(), ['a', 'b']);
+    assert.deepEqual(bridge.listPending({ sessionId: 'S2' }), ['d']);
+    assert.equal(bridge.listPending({}).length, 4, '不给过滤条件就是全部');
+
+    // 已被裁决的不该再算「在等」——否则会被反复收敛
+    bridge.resolve('a', { superseded: true });
+    assert.deepEqual(bridge.listPending({ sessionId: 'S1', event: 'stop' }), ['b']);
+
+    assert.deepEqual(bridge.listPending({ sessionId: '不存在' }), []);
+});
+
+test('listPending 在目录不存在时返回空数组而不是抛', () => {
+    const bridge = new DecisionBridge(path.join(os.tmpdir(), 'bridge-nope-' + Date.now()));
+    assert.deepEqual(bridge.listPending({}), []);
+});

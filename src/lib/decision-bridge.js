@@ -118,6 +118,31 @@ class DecisionBridge {
     getRequest(id) { return this._readJson(this._requestPath(id)); }
 
     /**
+     * 列出仍在等待的请求 id，可按 session_id / event 过滤。
+     *
+     * 用途是「同一会话只保留一张待回复的卡」：等待窗口长达 24h 时，每轮结束都会留下一个
+     * 阻塞进程和一张永久有效的卡。攒上几个之后，用户回复旧卡会把续写注入到几小时前就
+     * 结束的那一轮里 —— 所以新一轮开始前要先把上一轮那张收敛掉。
+     */
+    listPending({ sessionId, event } = {}) {
+        let names;
+        try { names = fs.readdirSync(this.dir); } catch { return []; }
+
+        const ids = [];
+        for (const name of names) {
+            const m = /^(.+)\.request\.json$/.exec(name);
+            if (!m) continue;
+            const request = this.getRequest(m[1]);
+            if (!request) continue;
+            if (sessionId && request.session_id !== sessionId) continue;
+            if (event && request.event !== event) continue;
+            if (!this.isPending(m[1])) continue;
+            ids.push(m[1]);
+        }
+        return ids;
+    }
+
+    /**
      * 写入裁决（listener 侧）。返回 false 表示无人在等（请求不存在或已被裁决），
      * 调用方据此告诉用户「这次点击来晚了」，而不是假报成功。
      */
