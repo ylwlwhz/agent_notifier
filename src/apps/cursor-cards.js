@@ -362,6 +362,85 @@ function buildSettledFollowupCard({ event, body, statusText }) {
     });
 }
 
+// ── 提问卡（MCP 工具 ask_user 发，见 cursor-ask-mcp）──────────────────────────
+
+const ASK_CANCEL = Object.freeze({
+    label: '⛔ 已取消提问',
+    decision: { cancelled: true },
+});
+
+/**
+ * 提问卡：让 agent 把「需要用户决策」这件事变成一次可远程作答的交互。
+ *
+ * 为什么不能用 IDE 自带的选择题组件：它不触发任何 hook、也不结束本轮，人在外面既看不到
+ * 问题也无法回答（详见 docs/ai_rules.md 的实测结论）。而 MCP 工具调用有正常的返回值，
+ * 我们可以在自己的进程里阻塞着等飞书那边点一下，再把答案作为工具结果交回 agent。
+ *
+ * 按钮/输入框的 action_type 沿用 Claude 选择卡那一套（opt_N / text_input / interrupt），
+ * 于是 listener 的既有回流通路一行都不用改。
+ */
+function buildAskCard({ question, options = [], context = '', stateKey, timeoutMs, projectName, model }) {
+    const elements = [];
+
+    if (context) {
+        elements.push(...parseMarkdownToElements(clipBody(context)));
+        elements.push({ tag: 'hr' });
+    }
+    elements.push(...parseMarkdownToElements(clipBody(question) || '需要你做个决定'));
+
+    options.forEach((opt, i) => {
+        elements.push({
+            tag: 'button',
+            text: { tag: 'plain_text', content: String(opt).slice(0, 100) },
+            type: i === 0 ? 'primary' : 'default',
+            value: { action_type: `opt_${i}`, session_state_key: stateKey },
+        });
+    });
+
+    elements.push(inputEl(stateKey, options.length ? '或直接输入你的答案…' : '输入你的答案…'));
+    elements.push(buttonRow([
+        { text: '⛔ 取消提问', actionType: 'interrupt', type: 'default' },
+    ], stateKey));
+    elements.push(waitHint(timeoutMs, '让它改用「正文列选项 + 结束本轮」，你仍可从完成卡回复'));
+    elements.push(cursorFooter({ model, projectName }));
+
+    return card2({
+        template: 'turquoise',
+        title: 'Cursor 需要你决定',
+        tags: [{ text: '待你回答', color: 'turquoise' }],
+        elements,
+    });
+}
+
+/**
+ * 提问卡的收敛版：撤掉按钮与输入框，把「问了什么、得到什么」留在卡上。
+ * 保留问题正文——那是这张卡事后唯一的查阅价值；配色按有没有拿到答案区分。
+ */
+function buildSettledAskCard({ question, statusText, answered }) {
+    const elements = [{ tag: 'markdown', content: statusText }];
+    const shown = clipBody(question);
+    if (shown) {
+        elements.push({ tag: 'hr' });
+        elements.push(...parseMarkdownToElements(shown));
+    }
+    return card2({
+        template: answered ? 'green' : 'grey',
+        icon: '',
+        title: answered ? 'Cursor 提问 · 已回答' : 'Cursor 提问 · 已超时',
+        elements,
+    });
+}
+
+/** 提问卡的回调映射：opt_N → 该选项文本；输入框 → 自定义答案；中断 → 取消 */
+function askResponses(options = []) {
+    const responses = { interrupt: JSON.parse(JSON.stringify(ASK_CANCEL)) };
+    options.forEach((opt, i) => {
+        const label = String(opt);
+        responses[`opt_${i}`] = { label: `已选择：${label}`, decision: { answer: label } };
+    });
+    return responses;
+}
+
 // ── 卡死告警卡（看门狗发，见 cursor-stall-watch）──────────────────────────────
 
 /**
@@ -482,6 +561,9 @@ module.exports = {
     buildApprovalCard,
     buildFollowupCard,
     buildFailureCard,
+    buildAskCard,
+    buildSettledAskCard,
+    askResponses,
     buildStallCard,
     buildLiveCard,
     buildSettledCard,

@@ -244,6 +244,20 @@ else
 fi
 echo ""
 
+# ── 4.3 注册 ask_user MCP 服务 ───────────────────────────
+# IDE 自带的交互式选择题不触发任何 hook，人在外面看不到也无法回答。MCP 工具调用有正常
+# 返回值，可以由我们的进程阻塞着等飞书回答再交回 agent —— 这是官方通道里唯一能承载
+# 「远程作答」的一条（详见 docs/ai_rules.md）。
+info "正在注册 ask_user MCP 服务..."
+
+CURSOR_MCP_FILE="$HOME/.cursor/mcp.json"
+if AGENT_NOTIFIER_DIR="$INSTALL_DIR" node "$INSTALL_DIR/scripts/setup-cursor-mcp.js"; then
+    success "MCP 服务已注册（$CURSOR_MCP_FILE）"
+else
+    warn "MCP 服务注册失败，可稍后手动运行：node $INSTALL_DIR/scripts/setup-cursor-mcp.js"
+fi
+echo ""
+
 # ── 4.5 配置 statusLine（cost-capture + 跨平台 statusline.sh）──
 info "正在配置 statusLine..."
 

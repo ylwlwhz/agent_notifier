@@ -264,3 +264,61 @@ test('落款带机器标识：远程机的卡片必须能看出是哪台', () =>
         else process.env.AGENT_NOTIFIER_MACHINE = prev;
     }
 });
+
+// ── 提问卡（MCP ask_user）────────────────────────────────────────────────────
+
+test('提问卡：选项渲染成按钮，且带输入框与取消按钮', () => {
+    const card = cards.buildAskCard({
+        question: '两个方案怎么选？',
+        options: ['方案 A', '方案 B'],
+        context: '背景：磁盘快满了',
+        stateKey: 'k-ask',
+        timeoutMs: 3000000,
+        projectName: 'demo',
+    });
+
+    const buttons = collect(card.body.elements, 'button');
+    assert.deepEqual(buttons.map((b) => b.value.action_type), ['opt_0', 'opt_1', 'interrupt']);
+    assert.ok(buttons.every((b) => b.value.session_state_key === 'k-ask'));
+    assert.equal(buttons[0].type, 'primary', '第一个选项高亮，方便一键选默认');
+
+    const inputs = collect(card.body.elements, 'input');
+    assert.equal(inputs.length, 1);
+    assert.equal(inputs[0].value.action_type, 'text_input');
+
+    const body = JSON.stringify(card.body.elements);
+    assert.match(body, /两个方案怎么选/);
+    assert.match(body, /磁盘快满了/);
+    assert.match(body, /50 分钟|3000s/, '要把等待时长写在卡上');
+    assert.match(footerText(card), /🤖 Cursor/);
+});
+
+test('提问卡：没有候选项时也能用（纯问答，只留输入框）', () => {
+    const card = cards.buildAskCard({ question: '给个目录名', stateKey: 'k2', timeoutMs: 60000 });
+    const buttons = collect(card.body.elements, 'button');
+    assert.deepEqual(buttons.map((b) => b.value.action_type), ['interrupt']);
+    assert.equal(collect(card.body.elements, 'input').length, 1);
+});
+
+test('提问卡回调映射：opt_N 带出选项原文，中断映射成取消', () => {
+    const responses = cards.askResponses(['方案 A', '方案 B']);
+    assert.deepEqual(responses.opt_0.decision, { answer: '方案 A' });
+    assert.deepEqual(responses.opt_1.decision, { answer: '方案 B' });
+    assert.deepEqual(responses.interrupt.decision, { cancelled: true });
+    assert.equal(responses.opt_other, undefined, 'Other 只是展开输入框，不该有裁决');
+});
+
+test('提问卡收敛：保留问题正文，按有没有拿到答案区分配色', () => {
+    const answered = cards.buildSettledAskCard({
+        question: '两个方案怎么选？', answered: true, statusText: '✅ 用户选择了第 1 个选项：方案 A',
+    });
+    assert.equal(answered.header.template, 'green');
+    assert.equal(collect(answered.body.elements, 'button').length, 0, '收敛必须撤掉交互组件');
+    assert.equal(collect(answered.body.elements, 'input').length, 0);
+    assert.match(JSON.stringify(answered.body.elements), /两个方案怎么选/, '正文是这张卡事后唯一的查阅价值');
+
+    const timedOut = cards.buildSettledAskCard({
+        question: 'Q', answered: false, statusText: '⏳ 已超时',
+    });
+    assert.equal(timedOut.header.template, 'grey');
+});

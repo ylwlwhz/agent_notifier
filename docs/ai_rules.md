@@ -174,7 +174,42 @@ Claude/Codex 能随时回是因为终端里有个活着的 TUI 停在提示符�
 Cursor 的 composer 是 GUI，没有等价物。要突破这个上限，必须让**会话的所有权翻转** ——
 由本仓库自己拥有会话，而不是去够 IDE 里那个。
 
-#### 选择题怎么办：绕开它，而不是拦住它
+#### 选择题的正解：用 MCP 工具承载「远程作答」
+
+hooks 拦不住选择题，但 **MCP 工具调用是有返回值的** —— 于是可以由我们自己的进程阻塞着等
+飞书那边点一下，再把答案作为工具结果交回 agent。不需要「deny + agent_message」那种歪招，
+agent 拿到的就是一次正常的工具结果。这是官方通道里唯一能承载这件事的一条。
+
+实现是 `src/apps/cursor-ask-mcp.js`（零依赖手写 stdio JSON-RPC，只实现
+`initialize` / `tools/list` / `tools/call` / `ping`），注册见 `scripts/setup-cursor-mcp.js`。
+工具名 `ask_user(question, options?, context?)`。
+
+**关键约束与坑：**
+
+- **超时上限是硬的。** IDE 里 `tools/call` 约 60 分钟；CLI / ACP 那条路是**硬编码 60 秒**，
+  且 `notifications/progress` 不会续期（官方论坛已确认是 TS SDK 的已知问题）。
+  所以默认只等 50 分钟（`CURSOR_ASK_TIMEOUT_SEC`），别贴着 60 调 —— 撞上上限时 Cursor 报
+  `MCP error -32001`，用户只看到「工具失败」。
+- **别用 MCP 的 elicitation 机制**（服务端反向向用户要输入）：那个超时约 60 秒且不可配，
+  官方已确认是限制。要阻塞就阻塞在 `tools/call` 里。
+- **stdout 是协议通道**，与 hook 同一个坑。`protectStdout()` 必须只在【作为主模块运行时】
+  调用：放在模块顶层会在被 `require` 时劫持宿主进程的 stdout（实测把 `node --test` 的
+  报告输出搅成乱码）。
+- **回流通路一行都没改。** 卡片按钮沿用 Claude 选择卡那套 action_type（`opt_N` /
+  `text_input` / `interrupt`），notification 里照常放 `responses` + `text_response`，
+  listener 的 `_cursorDecisionFor` 直接就认。加新交互时照这个形状来，别去改 listener。
+- **任何异常路径都必须给 agent 一段可执行的指引**（没凭据、发卡失败、超时都一样）：
+  告诉它「把选项编号写进正文并结束本轮」。空手而归的话它只会重试或干等，
+  用户在手机上还是什么都拿不到。
+
+降级链是刻意设计的：`ask_user`（50 分钟，按钮直接点）→ 超时后正文列选项 + 结束本轮
+（完成卡输入框，可达 24 小时）→ 都没人应就 `stop` 就地收尾。
+
+写测试时注意：`askUser` 内部会 `require` env-config，它调 `dotenv` 重新加载 `.env`，
+而 dotenv 只跳过【已存在】的键。所以用例里要把凭据**置空**而不是 `delete` ——
+delete 掉会被重新灌回来，用例就会真的发卡到飞书并阻塞几十分钟（实测踩过）。
+
+#### 兜底：把提问引导成「正文 + 结束本轮」
 
 既然选择题事后无从补救，就别让 agent 走到那一步。`sessionStart` 是唯一能改变 agent
 行为的官方注入点——它的输出字段 `additional_context` 会进「会话的 initial system context」。

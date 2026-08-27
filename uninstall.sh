@@ -191,6 +191,13 @@ else
     info "未找到 setup-cursor-hooks.js，跳过"
 fi
 
+if [ -f "$INSTALL_DIR/scripts/setup-cursor-mcp.js" ]; then
+    AGENT_NOTIFIER_DIR="$INSTALL_DIR" node "$INSTALL_DIR/scripts/setup-cursor-mcp.js" --remove \
+        || warn "MCP 服务移除失败，请检查 $HOME/.cursor/mcp.json"
+else
+    info "未找到 setup-cursor-mcp.js，跳过"
+fi
+
 echo ""
 
 # ── 2.5 还原 statusLine ─────────────────────────────────
