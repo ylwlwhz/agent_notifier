@@ -285,6 +285,14 @@ rsync -rlptD --no-owner --no-group --exclude='.git/' --exclude='.env' \
 目标路径 —— `rsync a/b/c.js x.example HOST:/repo/` 会把 `c.js` 丢到仓库根，成为一个
 谁都看不出来处的野文件。
 
+**在远程仓库切分支前先查「这个分支有没有那台机器的专用文件」。**
+那台机器出网必须走公司代理、SSH 直连不通，靠 `~/.ssh/config` 把 `github.com` 指到
+`ssh.github.com:443` + `bin/proxy-connect.py`（零依赖的 HTTP CONNECT 隧道，机器上
+nc/ncat/socat/corkscrew 全缺）打隧道。这个脚本原先只在 `tencent` 分支上，`git checkout`
+到别的分支会把它删掉 —— 症状是 git 突然「没有权限或仓库不存在」，
+真实原因藏在 `ssh -T git@github.com` 的第一行：`python3: can't open file ...`。
+现在它已并入本分支，别再把它当成无关文件删掉。
+
 **3. hook 的模块加载时间就是用户干等的时间。**
 远程仓库在网络文件系统（CephFS）上，实测 `require` 一次 Lark SDK 要 **12.6s**、axios 要
 5.7s，而 node 空启动只有 0.15s。同步发一张完成卡曾经要 17s —— 每轮结束都卡这么久。
