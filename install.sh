@@ -126,16 +126,19 @@ echo ""
 # Cursor 的 hook 是阻塞式的：hook 在 stdout 上回 JSON 决定 Cursor 下一步怎么走，
 # 所以远程控制不需要 PTY 中继，也不需要 cursor() 包装函数。
 #
-# 本分支专供内网机器，所以固定装【只读事件集】(--notify-only)：
-# 这类机器的典型用法是你在 Mac 上用 Cursor 的 Remote-SSH 连过来——agent 运行时整个跑在
-# 本机，hooks 也在本机执行，所以这一步是那类会话能收到飞书卡的前提。但审批/续写是阻塞
-# 链路，要求发卡的 hook 与收飞书回调的 listener 能碰到同一份决策文件，而 listener 在 Mac
-# 上，碰不上；装上阻塞事件只会让本机每条命令都白付一次 hook 启动开销。
-# 若你确实要在本机同时跑 listener 并使用远程审批，改跑：npm run cursor:hooks
-info "正在配置 Cursor Hooks（只读模式）..."
+# 内网机器自己也跑 listener（见下面第 6 步），所以 hook 与 listener 同机、能碰到同一份
+# decision-bridge 文件 —— 审批/续写这两条阻塞链路在这里是可用的，Remote-SSH 会话因此
+# 能做完整远程控制（agent 运行时整个跑在本机，hooks 也在本机执行）。
+#
+# 具体注册哪些事件由 .env 里的 CURSOR_REMOTE_APPROVAL / CURSOR_REMOTE_FOLLOWUP 决定，
+# 关着的链路不会注册对应事件（省掉每条命令一次白付的 hook 启动）。
+# 例外：若这台机器【不】跑 listener（回调由别的机器接），改跑
+#   node scripts/setup-cursor-hooks.js --notify-only
+# 强制退回只读 —— 否则阻塞链路没人接，白等一场超时。
+info "正在配置 Cursor Hooks..."
 
 CURSOR_HOOKS_FILE="$HOME/.cursor/hooks.json"
-if AGENT_NOTIFIER_DIR="$INSTALL_DIR" node "$INSTALL_DIR/scripts/setup-cursor-hooks.js" --notify-only; then
+if AGENT_NOTIFIER_DIR="$INSTALL_DIR" node "$INSTALL_DIR/scripts/setup-cursor-hooks.js"; then
     success "Cursor Hooks 配置完成（$CURSOR_HOOKS_FILE）"
 else
     warn "Cursor Hooks 配置失败，可稍后手动运行：node $INSTALL_DIR/scripts/setup-cursor-hooks.js"
@@ -512,7 +515,7 @@ echo ""
 info "安装目录: $INSTALL_DIR"
 info "配置文件: $INSTALL_DIR/.env"
 info "飞书 hooks: 已注册进 ~/.tclaude/settings.json（靠 FTCLAUDE=1 环境闸只在 ftclaude 生效）"
-info "Cursor Hooks: $CURSOR_HOOKS_FILE（只读事件集，Remote-SSH 会话也会发卡）"
+info "Cursor Hooks: $CURSOR_HOOKS_FILE（事件集按 .env 策略，Remote-SSH 会话也会发卡）"
 info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）中的 ftclaude() / ftcodex()"
 if [ -n "${_ft_proxy:-}" ]; then
     info "出网代理: git https 走代理；Node fetch 走代理(NODE_USE_ENV_PROXY=1，修 tclaude/claude-code 更新检查)；~/.ssh/config 让 github 走 ssh.github.com:443 隧道"

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# 跨平台 statusLine：PS1 风格前缀（user@host:cwd）+ ccusage 输出 + 套餐限额
-# （5h / 周）+ 最近一条 assistant 回复的 HH:MM:SS。
+# 跨平台 statusLine：PS1 风格前缀（user@host:cwd）+ ccusage 输出 + 套餐限额（5h / 周）。
 #
 # 由 agent-notifier install.sh 拷贝到 ~/.claude/statusline.sh。
+# 不再显示「最近一条 assistant 回复的时间」：Claude Code 自 2.1.24x 起自带这个
+# 时间戳（settings 的 showMessageTimestamps / showTurnDuration），状态栏再放一份
+# 是重复信息，还要为它逆序读整个 transcript。
 # 设计为 Linux / macOS 通用：
-#   - tail -r（BSD）→ 优先 tac（GNU），回退 tail -r
-#   - date -j（BSD 解析）→ 平台分支：GNU date -d / BSD date -j
 #   - ccusage 优先用已安装的（零网络零冷启动），再回退 bunx || npx || bun x
 #   - jq 缺失：静默输出空，绝不污染状态栏
 set -u
@@ -26,44 +26,6 @@ ps1_cwd=$(printf '%s' "$input" | jq -r '.cwd // empty')
 ps1_user=$(whoami)
 ps1_host=$(hostname -s 2>/dev/null || hostname)
 ps1_prefix=$(printf '\033[01;32m%s@%s\033[00m:\033[01;34m%s\033[00m' "$ps1_user" "$ps1_host" "$ps1_cwd")
-
-transcript=$(printf '%s' "$input" | jq -r '.transcript_path // empty')
-
-# ── 取 transcript 最后一条 assistant 消息的时间戳 ──
-# tail -r（BSD 逆序）在 Linux 不存在 → 优先 GNU 的 tac
-reverse_lines() {
-    if command -v tac >/dev/null 2>&1; then
-        tac
-    else
-        tail -r
-    fi
-}
-
-last_iso=""
-if [[ -n "$transcript" && -r "$transcript" ]]; then
-    last_iso=$(reverse_lines <"$transcript" 2>/dev/null \
-        | jq -r 'select(.type=="assistant") | .timestamp' 2>/dev/null \
-        | head -1)
-fi
-
-# ── ISO8601 → 本地 HH:MM:SS（GNU date 与 BSD date 语法不同）──
-iso_to_hhmmss() {
-    local iso="$1" clean epoch
-    clean=${iso%%.*}   # 去掉 .sssZ 毫秒
-    clean=${clean%Z}   # 去掉结尾 Z
-    if date --version >/dev/null 2>&1; then
-        # GNU date（Linux）：-u -d 解析 UTC，输出本地时间
-        epoch=$(date -u -d "${clean}Z" +%s 2>/dev/null) || return 1
-        date -d "@$epoch" "+%H:%M:%S" 2>/dev/null
-    else
-        # BSD date（macOS）：-j -u -f 显式格式
-        epoch=$(date -j -u -f "%Y-%m-%dT%H:%M:%S" "$clean" "+%s" 2>/dev/null) || return 1
-        date -r "$epoch" "+%H:%M:%S" 2>/dev/null
-    fi
-}
-
-last_hhmmss=""
-[[ -n "$last_iso" ]] && last_hhmmss=$(iso_to_hhmmss "$last_iso")
 
 # ── 套餐限额：来自 Claude 传入 payload 的 .rate_limits ──
 # used_percentage 是 0-100 的数，resets_at 是 epoch 秒。Claude 2.1.223 的 statusline
@@ -158,12 +120,15 @@ run_ccusage() {
 
 ccusage_out=$(printf '%s' "$input" | run_ccusage)
 
-# ── 两行输出：路径单占一行 ──
+# ── 三行输出：路径、用量、限额各占一行 ──
 # 仓库路径动辄几十列，和用量挤在一行会把后面的信息挤掉（单行渲染是 truncate，
 # 不是换行）。Claude 官方渲染器按 \n 拆分：一行时截断显示，多行时改成竖排逐行，
 # 并把前几行的 ANSI 序列续到下一行，所以第一行结尾的 reset 不会污染第二行。
-if [[ -n "$last_hhmmss" ]]; then
-    printf '%s\n%s%s | ⏱ %s\n' "$ps1_prefix" "$ccusage_out" "${limits:+ | $limits}" "$last_hhmmss"
-else
-    printf '%s\n%s%s\n' "$ps1_prefix" "$ccusage_out" "${limits:+ | $limits}"
-fi
+# 限额也单独占一行，而不是挂在用量行尾：ccusage 一行要吐 model / session / today /
+# block / burn / context 六段，实测 143 显示列，挂在行尾的限额在任何窄于此的终端上
+# 都会被整段切掉——「5h 限额不见了」就是这么来的，不是没渲染。
+# 逐段拼接而不是固定三个 %s：ccusage 缺失（无 bun/npx）或限额缺失时不留空行。
+out="$ps1_prefix"
+[[ -n "$ccusage_out" ]] && out+=$'\n'"$ccusage_out"
+[[ -n "$limits" ]] && out+=$'\n'"$limits"
+printf '%s\n' "$out"
