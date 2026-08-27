@@ -81,7 +81,7 @@ info "正在检查增强依赖（statusLine / ccusage / claude-remote-shell）..
 if command -v jq &>/dev/null; then
     success "jq $(jq --version 2>&1)"
 else
-    warn "未找到 jq（statusLine 时间戳解析需要）。安装：$(detect_pkg_hint jq)"
+    warn "未找到 jq（statusLine 解析 payload 的 cwd / rate_limits 需要）。安装：$(detect_pkg_hint jq)"
 fi
 
 if command -v bun &>/dev/null; then
