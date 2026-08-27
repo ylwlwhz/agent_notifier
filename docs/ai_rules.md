@@ -67,11 +67,15 @@
 
 - Hook 注册在 `~/.cursor/hooks.json`（用户级），由 `scripts/setup-cursor-hooks.js` 幂等写入；
   install.sh 会调它，uninstall.sh 用 `--remove` 只删本仓库注入的条目
-- 默认注册的事件：`sessionStart`（注入提问形态约定）、
-  `beforeShellExecution` / `beforeMCPExecution`（阻塞审批）、
-  `stop`（完成卡 + 阻塞续写）、`afterAgentResponse`（助手正文）、
-  `postToolUse` / `postToolUseFailure`（实时摘要与失败卡）。
-  `preToolUse` / `subagentStop` 有实现但默认不注册（对每个工具/子代理都触发，太吵）
+- 注册哪些事件**由 `.env` 里的策略决定**，不是写死的：只读事件（`sessionStart`、
+  `afterAgentResponse`、`postToolUse` / `postToolUseFailure`、`afterAgentThought`、
+  `subagentStart`）恒装；`beforeShellExecution` / `beforeMCPExecution` 只在
+  `CURSOR_REMOTE_APPROVAL=1` 时注册；`stop` 的超时按 `CURSOR_REMOTE_FOLLOWUP` 取长/短。
+  **别改成「一律装全」**：阻塞事件在策略关闭时照样会被调用（hook 只是立刻回空对象），
+  进程该起还是要起，网络文件系统上那是每条命令 1~2s 的白付开销。
+  `--notify-only` 是显式覆盖，供「listener 不在本机」的机器用——那种情况下阻塞链路
+  没人接，`.env` 怎么写都必须退回只读。
+  `preToolUse` / `subagentStop` 有实现但从不注册（对每个工具/子代理都触发，太吵）
 - 事件翻译在 `src/adapters/cursor/hook-adapter.js`，控制策略在 `control-policy.js`，
   卡片在 `src/apps/cursor-cards.js`，主流程在 `src/apps/cursor-hook.js`
 - 轮次边界用 `generation_id`（官方语义「每条用户消息都会变」），不要用 `conversation_id`

@@ -48,11 +48,20 @@ function readEnvTimeouts() {
         const n = parseFloat(process.env[key] ?? values[key]);
         return Number.isFinite(n) && n > 0 ? n : fallback;
     };
+    // 与 control-policy 的 truthy 同语义：只认 1/true/yes/on，其余按默认
+    const bool = (key, fallback) => {
+        const raw = String(process.env[key] ?? values[key] ?? '').trim().toLowerCase();
+        if (!raw) return fallback;
+        if (['0', 'false', 'no', 'off'].includes(raw)) return false;
+        return ['1', 'true', 'yes', 'on', 'all'].includes(raw) ? true : fallback;
+    };
     return {
         approvalSec: num('CURSOR_APPROVAL_TIMEOUT_SEC', 180),
         followupSec: num('CURSOR_FOLLOWUP_TIMEOUT_SEC', 300),
         loopLimit: Math.round(num('CURSOR_STOP_LOOP_LIMIT', 50)),
         expireHours: num('NOTIFICATION_EXPIRE_HOURS', 12),
+        approvalEnabled: bool('CURSOR_REMOTE_APPROVAL', false),
+        followupEnabled: bool('CURSOR_REMOTE_FOLLOWUP', false),
     };
 }
 
@@ -60,9 +69,11 @@ function readEnvTimeouts() {
  * 等待时长必须短于卡片有效期。否则 listener 的通知过期清理会先把这条通知删掉，
  * 用户在等待窗口内点卡片却被告知「卡片已过期」—— 长等待（数小时级）最容易撞上。
  */
-function warnIfWaitOutlivesCard({ approvalSec, followupSec, expireHours }) {
+function warnIfWaitOutlivesCard({ approvalSec, followupSec, expireHours }, { approval = true, followup = true } = {}) {
     const expireSec = expireHours * 3600;
-    const longest = Math.max(approvalSec, followupSec);
+    // 只有真的开启了的那条链路才算进「最长等待」——关着的审批不该拉高告警门槛
+    const waits = [approval ? approvalSec : 0, followup ? followupSec : 0];
+    const longest = Math.max(...waits);
     if (longest < expireSec) return;
     console.warn(
         `  ! 警告：最长等待 ${Math.round(longest / 3600 * 10) / 10}h 已达到/超过卡片有效期 ${expireHours}h。\n` +
@@ -75,11 +86,23 @@ function warnIfWaitOutlivesCard({ approvalSec, followupSec, expireHours }) {
  * hooks.json 的 timeout 必须大于我们自己的等待上限，否则 Cursor 会在飞书还没
  * 有人回应时就把 hook 杀掉——用户会看到「点了没反应」而毫无线索。留 30s 余量。
  */
+/**
+ * 注册哪些事件，由 .env 里的策略决定，而不是一个二元开关。
+ *
+ * 为什么不能「不带 --notify-only 就一律装全」：阻塞事件即使在策略关闭时也会照样被调用，
+ * hook 只是立刻回个空对象——但进程该起还是要起。网络文件系统上那是每条命令 1~2s 的
+ * 白付开销（见 docs 里的模块加载实测）。所以审批关着就别注册 beforeShellExecution。
+ *
+ * notifyOnly 保留为显式覆盖：listener 不在本机时，阻塞链路根本没人接，
+ * 无论 .env 怎么写都必须退回只读。
+ */
 function buildHooksConfig({ notifyOnly = false } = {}) {
     const timeouts = readEnvTimeouts();
     const { approvalSec, followupSec, loopLimit } = timeouts;
     const approvalTimeout = Math.ceil(approvalSec) + 30;
     const followupTimeout = Math.ceil(followupSec) + 30;
+    const wantApproval = !notifyOnly && timeouts.approvalEnabled;
+    const wantFollowup = !notifyOnly && timeouts.followupEnabled;
 
     const readOnly = {
         // 会话开始：注入提问形态约定。必须注册——IDE 的交互式选择题是零 hook 事件的
@@ -97,20 +120,24 @@ function buildHooksConfig({ notifyOnly = false } = {}) {
         subagentStart: { command, timeout: 10 },
     };
 
-    if (notifyOnly) {
-        // stop 只发一张只读完成卡，不等人 → 给足一次飞书 API 往返即可
-        return { ...readOnly, stop: { command, timeout: 60, loop_limit: loopLimit } };
+    const config = { ...readOnly };
+
+    if (wantApproval) {
+        // 阻塞审批：hook 返回 permission 决定 Cursor 放不放这条命令 / MCP 调用
+        config.beforeShellExecution = { command, timeout: approvalTimeout };
+        config.beforeMCPExecution = { command, timeout: approvalTimeout };
     }
 
-    warnIfWaitOutlivesCard(timeouts);
-    return {
-        ...readOnly,
-        // 阻塞审批：hook 返回 permission 决定 Cursor 放不放这条命令 / MCP 调用
-        beforeShellExecution: { command, timeout: approvalTimeout },
-        beforeMCPExecution: { command, timeout: approvalTimeout },
-        // 阻塞续写：hook 返回 followup_message 就能让 Cursor 自动开下一轮
-        stop: { command, timeout: followupTimeout, loop_limit: loopLimit },
-    };
+    // 阻塞续写：hook 返回 followup_message 就能让 Cursor 自动开下一轮。
+    // 不等人时给一次飞书 API 往返的富裕超时就够了，别挂着一个几小时的 timeout。
+    config.stop = wantFollowup
+        ? { command, timeout: followupTimeout, loop_limit: loopLimit }
+        : { command, timeout: 60, loop_limit: loopLimit };
+
+    if (wantApproval || wantFollowup) {
+        warnIfWaitOutlivesCard(timeouts, { approval: wantApproval, followup: wantFollowup });
+    }
+    return config;
 }
 
 function loadHooksFile() {
