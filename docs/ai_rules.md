@@ -271,7 +271,21 @@ hook 打完 `client ready` 就再无输出，最后被 hook 超时杀掉。SDK v
 302，看着像通的，实际上鉴权接口 `POST /open-apis/auth/v3/tenant_access_token/internal`
 直连返回 000、走代理才 200。要测就测鉴权接口。
 
-**2. hook 的模块加载时间就是用户干等的时间。**
+**2. 往远程 rsync 时不要用 `-a`，它会把远程仓库的 git 弄坏。**
+`-a` 含 `-o`/`-g`，接收端是 root 时会把文件属主改成本机 uid（远程根本没有这个 uid），
+git 随后一律拒绝工作：`fatal: detected dubious ownership`，连 `git config user.name`
+都读不出来。正确写法：
+
+```bash
+rsync -rlptD --no-owner --no-group --exclude='.git/' --exclude='.env' \
+      --exclude='node_modules/' --exclude='*.log' --exclude='*.pid' ./ HOST:/path/
+```
+
+已经坏了就 `chown -R root:root <repo>` 修回来。另外 rsync 多个源文件到一个目录时要写全
+目标路径 —— `rsync a/b/c.js x.example HOST:/repo/` 会把 `c.js` 丢到仓库根，成为一个
+谁都看不出来处的野文件。
+
+**3. hook 的模块加载时间就是用户干等的时间。**
 远程仓库在网络文件系统（CephFS）上，实测 `require` 一次 Lark SDK 要 **12.6s**、axios 要
 5.7s，而 node 空启动只有 0.15s。同步发一张完成卡曾经要 17s —— 每轮结束都卡这么久。
 
