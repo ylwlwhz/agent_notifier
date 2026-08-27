@@ -9,10 +9,19 @@
  * 作为工具结果交回 agent —— 不需要「deny + agent_message」那种歪招，agent 拿到的就是
  * 一次正常的工具结果。
  *
- * 唯一的硬约束是超时：IDE 里 tools/call 上限约 60 分钟（CLI/ACP 那条路是硬编码 60s，
- * 且 notifications/progress 不会续期，官方论坛已确认）。所以默认只等 50 分钟留足余量；
- * 等不到就返回一段指引，让 agent 退回「正文列选项 + 结束本轮」—— 那条路由完成卡的
- * 输入框接手，窗口可长达 24 小时。
+ * 唯一的硬约束是超时：IDE 里单次 tools/call 上限约 60 分钟（CLI/ACP 那条路是硬编码 60s，
+ * 且 notifications/progress 不会续期，官方论坛已确认）。
+ *
+ * 但「人在外面」需要的窗口远大于一小时，所以这里用【分段续等】绕开那个上限：
+ * 每次调用只阻塞 CURSOR_ASK_CHUNK_SEC（默认 50 分钟，留 10 分钟余量），到点若还没答案
+ * 就返回一个 pending_id，并明确要求 agent 立刻再调 ask_user_wait 继续等 —— 单次调用
+ * 永不触碰 60 分钟上限，总窗口可达 CURSOR_ASK_TIMEOUT_SEC（默认 12 小时）。
+ *
+ * 分段之所以安全，是因为裁决走的是【文件】而不是活的通道：用户在两段之间回答，答案落盘，
+ * 下一段 wait() 读文件照样拿到，不会漏。
+ *
+ * 总窗口也到期了才放弃，返回指引让 agent 退回「正文列选项 + 结束本轮」——
+ * 那条路由完成卡的输入框接手。
  *
  * 协议是手写的零依赖 stdio JSON-RPC：只需要 initialize / tools/list / tools/call，
  * 引 SDK 进来纯属给每次启动增加模块加载时间（网络文件系统上尤其贵）。
@@ -46,14 +55,29 @@ const SERVER_NAME = 'agent-notifier-ask';
 const SERVER_VERSION = '1.0.0';
 const FALLBACK_PROTOCOL = '2025-06-18';
 
-// 默认 50 分钟：IDE 的 tools/call 上限约 60 分钟，留 10 分钟余量。
-// 别贴着 60 调 —— 撞上上限时 Cursor 报的是 MCP error -32001，用户只看到「工具失败」。
-const DEFAULT_TIMEOUT_SEC = 3000;
+// 总等待窗口，默认 12 小时：人在外面时一小时远远不够。
+const DEFAULT_TIMEOUT_SEC = 43200;
+
+// 单次 tools/call 只阻塞这么久，默认 50 分钟。
+// 别贴着 60 分钟调 —— IDE 的上限就在那附近，撞上时 Cursor 报 MCP error -32001，
+// 用户只会看到「工具失败」，而不是「还在等你」。
+const DEFAULT_CHUNK_SEC = 3000;
 
 function timeoutMs() {
     const n = parseFloat(process.env.CURSOR_ASK_TIMEOUT_SEC);
     return (Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_SEC) * 1000;
 }
+
+function chunkMs() {
+    const n = parseFloat(process.env.CURSOR_ASK_CHUNK_SEC);
+    const chunk = (Number.isFinite(n) && n > 0 ? n : DEFAULT_CHUNK_SEC) * 1000;
+    // 分段不该比总窗口还长
+    return Math.min(chunk, timeoutMs());
+}
+
+// pending_id → 这一问的现场。MCP 服务进程在 Cursor 会话期间常驻，所以放内存里就够；
+// 进程真被重启了，那些卡也已经没人接了，用户点了会看到「未生效」——那是诚实的。
+const pending = new Map();
 
 function log(...args) {
     console.error('[cursor-ask-mcp]', ...args);
@@ -110,6 +134,23 @@ const ASK_TOOL = {
     },
 };
 
+const WAIT_TOOL = {
+    name: 'ask_user_wait',
+    description: [
+        '继续等待某次 ask_user 的回答。',
+        '当 ask_user（或本工具）返回「还没收到回答，pending_id=...」时，立刻用同一个 pending_id',
+        '再调一次本工具即可继续等 —— 单次调用不会超过 MCP 的时长上限，这样总等待窗口可以很长。',
+        '除非你决定不再等（那就把问题写进正文并结束本轮），否则不要跳过这一步。',
+    ].join('\n'),
+    inputSchema: {
+        type: 'object',
+        properties: {
+            pending_id: { type: 'string', description: 'ask_user 返回的 pending_id' },
+        },
+        required: ['pending_id'],
+    },
+};
+
 // ── ask_user 实现 ────────────────────────────────────────────────────────────
 
 /** 把裁决翻译成给 agent 看的工具结果文本 */
@@ -127,14 +168,39 @@ function describeAnswer(decision, options = []) {
         : `用户的回答：${answer}`;
 }
 
-/** 超时后给 agent 的指引：别重问，退回那条窗口更长的通路 */
+/** 人类可读的时长，用于给 agent 和卡片写文案 */
+function humanDuration(ms) {
+    const min = Math.round(ms / 60000);
+    if (min < 60) return `${Math.max(1, min)} 分钟`;
+    const h = Math.round(min / 60 * 10) / 10;
+    return `${h} 小时`;
+}
+
+/** 总窗口到期后给 agent 的指引：别重问，退回那条由完成卡承载的通路 */
 function timeoutGuidance(waitMs) {
-    const min = Math.max(1, Math.round(waitMs / 60000));
     return [
-        `用户没有在 ${min} 分钟内回答。`,
+        `用户没有在 ${humanDuration(waitMs)} 内回答。`,
         '不要再调用 ask_user 重问 —— 改成把问题和候选项【编上号写进正文】，然后结束本轮。',
-        '本轮结束时会推一张带输入框的完成卡，那条通路的等待窗口长得多（可达 24 小时），',
-        '用户回一个编号就能继续。',
+        '本轮结束时会推一张带输入框的完成卡，用户回一个编号就能继续。',
+    ].join('\n');
+}
+
+/**
+ * 单段等完但总窗口还没到：要求 agent 立刻续等。
+ *
+ * 措辞必须是明确的「下一步就做这个」，不能含糊 —— 含糊的话 agent 可能自己往下跑，
+ * 用户几小时后点了卡片却没人接。同时给出「不想等就正文提问」的另一条明路。
+ */
+function pendingGuidance(pendingId, remainingMs) {
+    return [
+        '还没收到用户的回答，卡片仍然有效（他可能不在电脑前）。',
+        `pending_id=${pendingId}`,
+        '',
+        `下一步：立刻调用 ask_user_wait({ pending_id: "${pendingId}" }) 继续等，`,
+        `剩余等待窗口约 ${humanDuration(remainingMs)}。`,
+        '（单次调用不能超过 MCP 的时长上限，所以长等待要靠这样一段段续。）',
+        '',
+        '如果你决定不再等，就把问题和候选项编号写进正文并结束本轮，让用户从完成卡回复。',
     ].join('\n');
 }
 
@@ -219,31 +285,83 @@ async function askUser({ question, options = [], context = '' }) {
         return noChannelGuidance(`提问卡没发出去（${err.message}）。`);
     }
 
-    const decision = await decisionBridge.wait(decisionId, { timeoutMs: waitMs });
-    decisionBridge.close(decisionId);
-    try { sessionState.removeNotification(stateKey); } catch { /* 清理尽力而为 */ }
+    // 登记现场，之后每次 ask_user_wait 都在同一个 decisionId 上继续等
+    const pendingId = decisionId;
+    pending.set(pendingId, {
+        decisionId,
+        stateKey,
+        messageId,
+        client,
+        question,
+        options: list,
+        deadline: Date.now() + waitMs,
+        totalMs: waitMs,
+    });
 
-    const answered = describeAnswer(decision, list);
+    return waitChunk(pendingId);
+}
 
-    // 收敛卡片：撤掉交互组件，把结果写在卡上。不然几十分钟后还能点，点了却「无人在等」。
-    if (messageId) {
-        try {
-            await client.im.message.patch({
-                path: { message_id: messageId },
-                data: {
-                    content: JSON.stringify(cards.buildSettledAskCard({
-                        question,
-                        answered: !!answered,
-                        statusText: answered ? `✅ ${answered}` : '⏳ **已超时** — 未收到回答，已交回正文提问',
-                    })),
-                },
-            });
-        } catch (err) {
-            log('收敛提问卡失败:', err.message);
-        }
+/** 收摊：关掉决策通道、清掉通知、把卡片收敛成只读态 */
+async function finish(ask, answered) {
+    const { decisionBridge } = require('../lib/decision-bridge');
+    const { sessionState } = require('../lib/session-state');
+    const cards = require('./cursor-cards');
+
+    decisionBridge.close(ask.decisionId);
+    try { sessionState.removeNotification(ask.stateKey); } catch { /* 清理尽力而为 */ }
+    pending.delete(ask.decisionId);
+
+    // 不收敛的话，几小时后卡片还能点，点了却「无人在等」
+    if (!ask.messageId) return;
+    try {
+        await ask.client.im.message.patch({
+            path: { message_id: ask.messageId },
+            data: {
+                content: JSON.stringify(cards.buildSettledAskCard({
+                    question: ask.question,
+                    answered: !!answered,
+                    statusText: answered
+                        ? `✅ ${answered}`
+                        : '⏳ **已超时** — 未收到回答，已交回正文提问',
+                })),
+            },
+        });
+    } catch (err) {
+        log('收敛提问卡失败:', err.message);
+    }
+}
+
+/**
+ * 等一段（不超过 chunkMs），据结果返回：答案 / 续等指引 / 最终超时指引。
+ *
+ * 分段的正确性来自「裁决是文件」：用户在两段之间回答，答案落盘，下一段 wait() 照样读到。
+ * 所以这里【不能】在段间收敛卡片，也不能关掉决策通道。
+ */
+async function waitChunk(pendingId) {
+    const ask = pending.get(pendingId);
+    if (!ask) {
+        return noChannelGuidance(`pending_id=${pendingId} 已经结束或不存在（可能已被回答、已超时，或服务重启过）。`);
     }
 
-    return answered || timeoutGuidance(waitMs);
+    const { decisionBridge } = require('../lib/decision-bridge');
+    const remaining = ask.deadline - Date.now();
+    const slice = Math.min(chunkMs(), Math.max(0, remaining));
+
+    const decision = slice > 0
+        ? await decisionBridge.wait(ask.decisionId, { timeoutMs: slice })
+        : decisionBridge.read(ask.decisionId); // 窗口已尽，最后瞄一眼免得错过刚落盘的答案
+
+    const answered = describeAnswer(decision, ask.options);
+    if (answered) {
+        await finish(ask, answered);
+        return answered;
+    }
+
+    const left = ask.deadline - Date.now();
+    if (left > 0) return pendingGuidance(pendingId, left);
+
+    await finish(ask, null);
+    return timeoutGuidance(ask.totalMs);
 }
 
 // ── JSON-RPC 分发 ────────────────────────────────────────────────────────────
@@ -268,22 +386,27 @@ async function handle(msg) {
             return reply(id, {});
 
         case 'tools/list':
-            return reply(id, { tools: [ASK_TOOL] });
+            return reply(id, { tools: [ASK_TOOL, WAIT_TOOL] });
 
         case 'tools/call': {
-            if (params?.name !== ASK_TOOL.name) {
+            const args = params?.arguments || {};
+            if (params?.name !== ASK_TOOL.name && params?.name !== WAIT_TOOL.name) {
                 return replyError(id, -32602, `未知工具: ${params?.name}`);
             }
-            const args = params.arguments || {};
-            if (!String(args.question || '').trim()) {
+            if (params.name === ASK_TOOL.name && !String(args.question || '').trim()) {
                 return reply(id, { isError: true, content: [{ type: 'text', text: 'question 不能为空' }] });
             }
+            if (params.name === WAIT_TOOL.name && !String(args.pending_id || '').trim()) {
+                return reply(id, { isError: true, content: [{ type: 'text', text: 'pending_id 不能为空' }] });
+            }
             try {
-                const text = await askUser({
-                    question: String(args.question),
-                    options: args.options,
-                    context: args.context ? String(args.context) : '',
-                });
+                const text = params.name === WAIT_TOOL.name
+                    ? await waitChunk(String(args.pending_id))
+                    : await askUser({
+                        question: String(args.question),
+                        options: args.options,
+                        context: args.context ? String(args.context) : '',
+                    });
                 return reply(id, { content: [{ type: 'text', text }] });
             } catch (err) {
                 log('ask_user 失败:', err.message);
@@ -328,10 +451,17 @@ module.exports = {
     handle,
     protectStdout,
     askUser,
+    waitChunk,
     describeAnswer,
     timeoutGuidance,
+    pendingGuidance,
     noChannelGuidance,
+    humanDuration,
     timeoutMs,
+    chunkMs,
+    pending,
     ASK_TOOL,
+    WAIT_TOOL,
     DEFAULT_TIMEOUT_SEC,
+    DEFAULT_CHUNK_SEC,
 };

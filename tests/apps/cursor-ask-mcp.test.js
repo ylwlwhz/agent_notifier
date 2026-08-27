@@ -48,19 +48,18 @@ test('协议：initialize 回显客户端版本并声明 tools 能力', async ()
     assert.equal(init.result.serverInfo.name, 'agent-notifier-ask');
 });
 
-test('协议：tools/list 暴露 ask_user，且 question 是必填', async () => {
+test('协议：tools/list 暴露 ask_user 与 ask_user_wait', async () => {
     const msgs = await roundtrip([
         { jsonrpc: '2.0', id: 1, method: 'initialize', params: {} },
         { jsonrpc: '2.0', method: 'notifications/initialized' },
         { jsonrpc: '2.0', id: 2, method: 'tools/list' },
     ]);
-    const listed = msgs.find((m) => m.id === 2);
-    assert.equal(listed.result.tools.length, 1);
-    const tool = listed.result.tools[0];
-    assert.equal(tool.name, 'ask_user');
-    assert.deepEqual(tool.inputSchema.required, ['question']);
+    const tools = msgs.find((m) => m.id === 2).result.tools;
+    assert.deepEqual(tools.map((t) => t.name), ['ask_user', 'ask_user_wait']);
+    assert.deepEqual(tools[0].inputSchema.required, ['question']);
+    assert.deepEqual(tools[1].inputSchema.required, ['pending_id']);
     // 工具描述必须点名让 agent 别用 AskQuestion —— 这是它被正确使用的关键
-    assert.match(tool.description, /AskQuestion/);
+    assert.match(tools[0].description, /AskQuestion/);
 });
 
 test('协议：通知没有 id，绝不能回响应（否则客户端会报协议错误）', async () => {
@@ -77,13 +76,15 @@ test('协议：未实现的方法如实回 -32601，不静默（否则客户端�
     assert.equal(msg.error.code, -32601);
 });
 
-test('协议：未知工具名回 -32602；question 为空回 isError 而不是崩', async () => {
+test('协议：未知工具名回 -32602；必填参数为空回 isError 而不是崩', async () => {
     const msgs = await roundtrip([
         { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'nope', arguments: {} } },
         { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'ask_user', arguments: { question: '  ' } } },
+        { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'ask_user_wait', arguments: {} } },
     ]);
     assert.equal(msgs.find((m) => m.id === 1).error.code, -32602);
     assert.equal(msgs.find((m) => m.id === 2).result.isError, true);
+    assert.equal(msgs.find((m) => m.id === 3).result.isError, true);
 });
 
 test('没配飞书凭据时不阻塞，直接给出「改用正文提问」的指引', async () => {
@@ -114,24 +115,52 @@ test('答案翻译：点选项带出编号，自定义回答原样带出，取�
     assert.equal(mcp.describeAnswer({ answer: '   ' }, options), null, '空答案不算回答');
 });
 
-test('超时指引必须明确「别重问」，并指向窗口更长的那条路', () => {
-    const text = mcp.timeoutGuidance(3000 * 1000);
-    assert.match(text, /50 分钟/);
+test('总窗口到期的指引必须明确「别重问」，并指向完成卡那条路', () => {
+    const text = mcp.timeoutGuidance(43200 * 1000);
+    assert.match(text, /12 小时/);
     assert.match(text, /不要再调用 ask_user/);
     assert.match(text, /结束本轮/);
 });
 
-test('等待上限默认 50 分钟，留足 IDE 那 60 分钟上限的余量', () => {
-    const saved = process.env.CURSOR_ASK_TIMEOUT_SEC;
-    delete process.env.CURSOR_ASK_TIMEOUT_SEC;
+test('续等指引必须带上 pending_id，并明确要求下一步就调 ask_user_wait', () => {
+    // 含糊的措辞会让 agent 自己往下跑，用户几小时后点了卡片却没人接
+    const text = mcp.pendingGuidance('cursorask_123_ab', 40000 * 1000);
+    assert.match(text, /pending_id=cursorask_123_ab/);
+    assert.match(text, /ask_user_wait\(\{ pending_id: "cursorask_123_ab" \}\)/);
+    assert.match(text, /11\.1 小时|小时/);
+    assert.match(text, /写进正文/, '也要给出「不想等了」的另一条明路');
+});
+
+test('时长文案：不足一小时按分钟，超过按小时', () => {
+    assert.equal(mcp.humanDuration(30 * 60000), '30 分钟');
+    assert.equal(mcp.humanDuration(3000 * 1000), '50 分钟');
+    assert.equal(mcp.humanDuration(43200 * 1000), '12 小时');
+});
+
+test('总窗口默认 12 小时，单段默认 50 分钟（绕开 IDE 的 60 分钟上限）', () => {
+    const keys = ['CURSOR_ASK_TIMEOUT_SEC', 'CURSOR_ASK_CHUNK_SEC'];
+    const saved = {};
+    for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
     try {
-        assert.equal(mcp.timeoutMs(), 3000 * 1000);
+        assert.equal(mcp.timeoutMs(), 43200 * 1000);
+        assert.equal(mcp.chunkMs(), 3000 * 1000);
+
         process.env.CURSOR_ASK_TIMEOUT_SEC = '120';
         assert.equal(mcp.timeoutMs(), 120 * 1000);
+        assert.equal(mcp.chunkMs(), 120 * 1000, '分段不该比总窗口还长');
+
         process.env.CURSOR_ASK_TIMEOUT_SEC = '0';
-        assert.equal(mcp.timeoutMs(), 3000 * 1000, '非法值退回默认，不能变成 0 等待');
+        assert.equal(mcp.timeoutMs(), 43200 * 1000, '非法值退回默认，不能变成 0 等待');
     } finally {
-        if (saved === undefined) delete process.env.CURSOR_ASK_TIMEOUT_SEC;
-        else process.env.CURSOR_ASK_TIMEOUT_SEC = saved;
+        for (const k of keys) {
+            if (saved[k] === undefined) delete process.env[k];
+            else process.env[k] = saved[k];
+        }
     }
+});
+
+test('续等：pending_id 不存在时给出可执行的退路，而不是抛异常', async () => {
+    const text = await mcp.waitChunk('cursorask_not_here');
+    assert.match(text, /已经结束或不存在/);
+    assert.match(text, /写进正文/);
 });
