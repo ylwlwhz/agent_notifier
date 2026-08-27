@@ -88,11 +88,19 @@ async function main() {
     // the callback injects into the right container.
     async function handleSendCard(req) {
         if (!app.chatId) throw new Error('send_card: chatId unresolved');
-        await app.client.im.message.create({
-            params: { receive_id_type: 'chat_id' },
-            data: { receive_id: app.chatId, msg_type: 'interactive', content: JSON.stringify(req.card) },
-        });
+        // 先写 state 再发卡：反序会留下「卡片已可点、通知还没落盘」的竞态窗口
+        // （一次飞书 API 往返，实测 1.0-5.3s），窗口内点击会误报「卡片已过期」。
+        // 发送失败则回滚，不留孤儿通知。
         await state.addNotificationAsync(req.state_key, { ...req.notification, created_at: Date.now() });
+        try {
+            await app.client.im.message.create({
+                params: { receive_id_type: 'chat_id' },
+                data: { receive_id: app.chatId, msg_type: 'interactive', content: JSON.stringify(req.card) },
+            });
+        } catch (err) {
+            await state.removeNotificationAsync(req.state_key).catch(() => {});
+            throw err;
+        }
     }
 
     // Dispatch table by request kind.

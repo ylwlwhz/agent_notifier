@@ -122,6 +122,26 @@ AGENT_NOTIFIER_DIR="$INSTALL_DIR" AGENT_NOTIFIER_STATUSLINE=0 \
 success "hooks 已注册（普通 tclaude 缺 FTCLAUDE=1 会秒退，不受影响）"
 echo ""
 
+# ── 4.2 配置 Cursor Hooks ────────────────────────────────
+# Cursor 的 hook 是阻塞式的：hook 在 stdout 上回 JSON 决定 Cursor 下一步怎么走，
+# 所以远程控制不需要 PTY 中继，也不需要 cursor() 包装函数。
+#
+# 本分支专供内网机器，所以固定装【只读事件集】(--notify-only)：
+# 这类机器的典型用法是你在 Mac 上用 Cursor 的 Remote-SSH 连过来——agent 运行时整个跑在
+# 本机，hooks 也在本机执行，所以这一步是那类会话能收到飞书卡的前提。但审批/续写是阻塞
+# 链路，要求发卡的 hook 与收飞书回调的 listener 能碰到同一份决策文件，而 listener 在 Mac
+# 上，碰不上；装上阻塞事件只会让本机每条命令都白付一次 hook 启动开销。
+# 若你确实要在本机同时跑 listener 并使用远程审批，改跑：npm run cursor:hooks
+info "正在配置 Cursor Hooks（只读模式）..."
+
+CURSOR_HOOKS_FILE="$HOME/.cursor/hooks.json"
+if AGENT_NOTIFIER_DIR="$INSTALL_DIR" node "$INSTALL_DIR/scripts/setup-cursor-hooks.js" --notify-only; then
+    success "Cursor Hooks 配置完成（$CURSOR_HOOKS_FILE）"
+else
+    warn "Cursor Hooks 配置失败，可稍后手动运行：node $INSTALL_DIR/scripts/setup-cursor-hooks.js"
+fi
+echo ""
+
 # ── 5. 注入 ftclaude() / ftcodex() shell 函数 ──────────────
 info "正在配置 ftclaude / ftcodex shell 函数..."
 
@@ -252,6 +272,17 @@ if [ -n "$_ft_proxy" ]; then
     # ① git https 走代理（幂等）
     git config --global http.proxy  "$_ft_proxy" 2>/dev/null || true
     git config --global https.proxy "$_ft_proxy" 2>/dev/null || true
+
+    # ①.2 .env 落盘 FEISHU_FORCE_PROXY=1（幂等）
+    # 这台机器直连飞书鉴权接口不通（POST /open-apis/auth/v3/tenant_access_token/internal
+    # 直连返回 000、走代理才 200），而默认逻辑会把飞书域名放进 no_proxy 强制直连。
+    # 以前这里只是 warn 一句「请确认已设置」，漏设的后果很隐蔽：Lark SDK 不报错、直接
+    # 静默挂住，hook 打完 `client ready` 就再无输出，最后被超时杀掉。所以改成自动写。
+    if [ -f "$INSTALL_DIR/.env" ] && ! grep -q '^FEISHU_FORCE_PROXY=' "$INSTALL_DIR/.env"; then
+        printf '\n# 本机出网必须走代理，飞书直连不通（由安装脚本自动写入）\nFEISHU_FORCE_PROXY=1\n' \
+            >> "$INSTALL_DIR/.env"
+        success "已在 .env 写入 FEISHU_FORCE_PROXY=1（飞书改走代理 + axios shim）"
+    fi
 
     # ①.5 让 Node 自带 fetch/undici 也走环境代理（幂等，带标记块）
     # undici 默认不读 http(s)_proxy，直连外网会超时 —— claude-code 的「检查更新」用的就是
@@ -481,9 +512,11 @@ echo ""
 info "安装目录: $INSTALL_DIR"
 info "配置文件: $INSTALL_DIR/.env"
 info "飞书 hooks: 已注册进 ~/.tclaude/settings.json（靠 FTCLAUDE=1 环境闸只在 ftclaude 生效）"
+info "Cursor Hooks: $CURSOR_HOOKS_FILE（只读事件集，Remote-SSH 会话也会发卡）"
 info "Shell 函数: ~/.zshenv（zsh）、~/.bashrc（bash）中的 ftclaude() / ftcodex()"
 if [ -n "${_ft_proxy:-}" ]; then
     info "出网代理: git https 走代理；Node fetch 走代理(NODE_USE_ENV_PROXY=1，修 tclaude/claude-code 更新检查)；~/.ssh/config 让 github 走 ssh.github.com:443 隧道"
+    info "飞书发卡: FEISHU_FORCE_PROXY=1（直连不通，改走代理 + axios shim）"
 fi
 echo ""
 info "后续步骤："
@@ -491,5 +524,10 @@ echo "  1. 编辑 .env 填入飞书配置与代理（如尚未配置）"
 echo "  2. 重新打开终端，或 source ~/.bashrc（bash）/ ~/.zshenv（zsh）加载 ftclaude / ftcodex"
 echo "  3. 运行 ftclaude 启动带飞书通知的 tclaude"
 echo "  4. 运行 ftcodex 启动带飞书通知的 tcodex"
+echo ""
+info "Cursor 远程控制默认只开通知，控制类需在 .env 显式打开（会阻塞 Cursor 等你拍板）："
+echo "  CURSOR_REMOTE_APPROVAL=1   飞书上批准/拒绝 Shell 与 MCP 调用"
+echo "  CURSOR_REMOTE_FOLLOWUP=1   任务结束后在飞书上直接发下一条指令"
+echo "  改完超时相关配置后请重跑 install.sh，让 hooks.json 的 timeout 同步"
 echo ""
 success "祝使用愉快！"

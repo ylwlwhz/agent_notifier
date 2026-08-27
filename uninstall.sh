@@ -195,6 +195,18 @@ remove_hooks_from "$HOME/.tclaude/settings.json"
 
 echo ""
 
+# ── 2.2 移除 Cursor Hooks ───────────────────────────────
+info "正在移除 Cursor Hooks..."
+
+if [ -f "$INSTALL_DIR/scripts/setup-cursor-hooks.js" ]; then
+    AGENT_NOTIFIER_DIR="$INSTALL_DIR" node "$INSTALL_DIR/scripts/setup-cursor-hooks.js" --remove \
+        || warn "Cursor Hooks 移除失败，请检查 $HOME/.cursor/hooks.json"
+else
+    info "未找到 setup-cursor-hooks.js，跳过"
+fi
+
+echo ""
+
 # ── 2.5 还原 statusLine ─────────────────────────────────
 info "正在还原 statusLine..."
 
@@ -305,7 +317,9 @@ for f in session-state.json session-state.json.tmp \
 done
 
 # /tmp 运行时文件
-for pattern in agent-inject-pts claude-pty-output- codex-pty-output- claude-live- codex-live-; do
+for pattern in agent-inject-pts claude-pty-output- codex-pty-output- claude-live- codex-live- \
+               cursor-live- cursor-last-response- \
+               cursor-activity- cursor-stall- cursor-card- cursor-send-card-error.log; do
     for f in /tmp/${pattern}*; do
         if [ -f "$f" ] || [ -p "$f" ]; then
             rm -f "$f"
@@ -315,6 +329,8 @@ for pattern in agent-inject-pts claude-pty-output- codex-pty-output- claude-live
 done
 rm -f /tmp/codex-assistant-feed.jsonl
 rm -f /tmp/ask-handler-diag.log
+# Cursor 决策交汇目录（hook 与 listener 的会合点）
+rm -rf /tmp/agent-notifier-decisions
 
 success "运行时文件已清理"
 echo ""

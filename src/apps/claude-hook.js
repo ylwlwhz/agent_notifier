@@ -258,14 +258,20 @@ async function sendCard(app, card, { stateKey, sessionId, type, ptsDevice, respo
         return;
     }
 
+    // 必须「先写 state，再发卡」。反过来会留下一个竞态窗口：卡片在飞书上已经
+    // 可点，但通知还没落盘，此时点击查不到通知 → 误报「卡片已过期」。
+    // 实测这个窗口是 1.0-5.3s（一次飞书 API 往返），用户回得越快越容易撞上——
+    // 正是「我用的就是最新卡，却提示已过期」的成因。
+    // 发送失败则回滚，避免留下一条永远等不到卡片的孤儿通知。
+    sessionState.addNotification(stateKey, { ...notification, created_at: Date.now() });
     try {
         await app.client.im.message.create({
             params: { receive_id_type: 'chat_id' },
             data: { receive_id: app.chatId, msg_type: 'interactive', content: JSON.stringify(card) },
         });
-        sessionState.addNotification(stateKey, { ...notification, created_at: Date.now() });
     } catch (err) {
         console.error('[feishu] 发送卡片失败:', err.message);
+        try { sessionState.removeNotification(stateKey); } catch { /* 回滚尽力而为 */ }
     }
 }
 

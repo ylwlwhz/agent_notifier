@@ -1,0 +1,16 @@
+{
+  "hook_event_name": "postToolUseFailure",
+  "conversation_id": "conv-9f8e7d6c5b4a",
+  "generation_id": "gen-0002",
+  "model_id": "claude-opus-5",
+  "cursor_version": "1.7.2",
+  "workspace_roots": ["/Users/dev/code/agent_notifier"],
+  "tool_name": "Shell",
+  "tool_input": { "command": "npm run e2e" },
+  "tool_use_id": "tu-78",
+  "cwd": "/Users/dev/code/agent_notifier",
+  "error_message": "Command timed out after 30s",
+  "failure_type": "timeout",
+  "duration": 30000,
+  "is_interrupt": false
+}

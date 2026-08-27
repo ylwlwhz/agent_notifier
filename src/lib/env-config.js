@@ -38,8 +38,9 @@ class EnvConfig {
         // 若不放行，Lark SDK(axios) 会把飞书 API 也走代理并被 403 拦截，导致卡片发不出。
         // 这里统一把飞书域名追加进 no_proxy，确保任何启动方式(含 tmux 内继承代理)都直连飞书。
         //
-        // 例外：部分机器（如公司内网服务器）出网**必须**走代理，飞书直连反而不通。
-        // 此时在 .env 设 FEISHU_FORCE_PROXY=1，跳过 no_proxy 注入，让飞书也走代理。
+        // 例外：部分机器（如公司内网服务器）出网**必须**走代理，飞书直连反而不通 ——
+        // 症状是发卡时报 `Cannot destructure property 'tenant_access_token'`（连不上鉴权接口）。
+        // 这类机器在 .env 设 FEISHU_FORCE_PROXY=1，跳过 no_proxy 注入，让飞书也走代理。
         if (!this.isFeishuForceProxy()) {
             this.ensureFeishuNoProxy();
         }

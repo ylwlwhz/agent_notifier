@@ -138,6 +138,10 @@ async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notif
 
     const card = buildMultiSelectCard(notif, stateKey);
 
+    // 先写 state 再发卡，避免「卡片已可点但通知未落盘」的竞态（误报已过期）。
+    // _message_id 只能在发送后才知道，故发完再补写——它仅用于 form 回调不带
+    // action.value 时的反查兜底，短暂缺失不影响按钮/输入框的正常路由。
+    await state.addNotificationAsync(stateKey, notif);
     try {
         const resp = await app.client.im.message.create({
             params: { receive_id_type: 'chat_id' },
@@ -147,10 +151,16 @@ async function sendMultiSelectCard(app, q, stateKey, ptsDevice, sessionId, notif
                 content: JSON.stringify(card),
             },
         });
-        notif._message_id = resp?.data?.message_id || null;
-        await state.addNotificationAsync(stateKey, notif);
+        const messageId = resp?.data?.message_id || null;
+        if (messageId) {
+            await state.mutateAsync((data) => {
+                if (!data[stateKey]) return false; // 已被消费/清理，不复活
+                data[stateKey]._message_id = messageId;
+            });
+        }
     } catch (err) {
         console.error('[ask-handler] 发送多选卡片失败:', err.message);
+        await state.removeNotificationAsync(stateKey).catch(() => {});
     }
 }
 
@@ -180,6 +190,15 @@ async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, noti
     responses['esc'] = { keys: '\x1b', label: 'Esc' };
     responses['interrupt'] = { keys: '\x1b', label: '⛔ Interrupt' };
 
+    // 先写 state 再发卡（见 sendMultiSelectCard 注释：反序会误报「卡片已过期」）
+    await state.addNotificationAsync(stateKey, {
+        session_id: sessionId,
+        notification_type: notificationType,
+        pts_device: ptsDevice,
+        container_id: ctx.containerId,
+        created_at: Date.now(),
+        responses,
+    });
     try {
         await app.client.im.message.create({
             params: { receive_id_type: 'chat_id' },
@@ -189,16 +208,9 @@ async function sendSingleSelectCard(app, q, stateKey, ptsDevice, sessionId, noti
                 content: JSON.stringify(card),
             },
         });
-        await state.addNotificationAsync(stateKey, {
-            session_id: sessionId,
-            notification_type: notificationType,
-            pts_device: ptsDevice,
-            container_id: ctx.containerId,
-            created_at: Date.now(),
-            responses,
-        });
     } catch (err) {
         console.error('[ask-handler] 发送单选卡片失败:', err.message);
+        await state.removeNotificationAsync(stateKey).catch(() => {});
     }
 }
 

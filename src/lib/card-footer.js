@@ -3,6 +3,7 @@
 const HOST_LABELS = {
     claude: '🤖 Claude',
     codex: '🤖 Codex',
+    cursor: '🤖 Cursor',
 };
 
 function formatTokenCount(n) {
@@ -63,10 +64,13 @@ function formatDuration(startedAt, endedAt = Date.now()) {
 
 /**
  * 通用卡片 footer 构建器
- * 统一格式: 🤖 {Host}  ·  🖥 {terminal}  ·  📁 {projectName}  ·  ⏱ {duration}  ·  ⏰ {timestamp}  ·  📊 token统计
+ * 统一格式: 🤖 {Host}  ·  🧠 {model}  ·  🖥 {terminal}  ·  📁 {projectName}  ·  ⏱ {duration}  ·  ⏰ {timestamp}  ·  📊 token统计
  *
  * @param {Object} opts
- * @param {string} opts.host - 宿主标识: 'claude' | 'codex'
+ * @param {string} opts.host - 宿主标识: 'claude' | 'codex' | 'cursor'
+ * @param {string} [opts.machine] - 机器标识，如 'GY_2'。同一个飞书群会同时收到本机与
+ *   多台远程机（Cursor Remote-SSH 的 hook 跑在远程侧）的卡片，不标出来根本分不清是哪台
+ * @param {string} [opts.model] - 模型标识（Cursor hook 会带 model/model_id，终端宿主一般没有）
  * @param {string} [opts.ptsDevice] - 终端设备标识，如 'pts/3'、'tmux:session:0'
  * @param {string} [opts.projectName] - 项目名
  * @param {Object|null} [opts.tokens] - token 统计对象
@@ -76,12 +80,18 @@ function formatDuration(startedAt, endedAt = Date.now()) {
  * @param {string} [opts.timestamp] - 当前时间文本，默认自动生成
  * @returns {{ tag: string, content: string }} 飞书 markdown 元素
  */
-function buildCardFooter({ host, ptsDevice, projectName, tokens, startedAt = null, endedAt = Date.now(), duration = null, timestamp = null }) {
+function buildCardFooter({ host, machine = null, model = null, ptsDevice, projectName, tokens, startedAt = null, endedAt = Date.now(), duration = null, timestamp = null }) {
     const parts = [];
 
     // 🤖 宿主标识
     const hostLabel = HOST_LABELS[host] || `🤖 ${host || 'Unknown'}`;
     parts.push(hostLabel);
+
+    // 📍 机器标识（只在显式配置了才出现，本机卡片保持原样）
+    if (machine) parts.push(`📍 ${machine}`);
+
+    // 🧠 模型
+    if (model) parts.push(`🧠 ${model}`);
 
     // 🖥 终端标识
     if (ptsDevice) {

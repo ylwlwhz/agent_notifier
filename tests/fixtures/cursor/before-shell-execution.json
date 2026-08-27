@@ -1,0 +1,14 @@
+{
+  "hook_event_name": "beforeShellExecution",
+  "conversation_id": "conv-9f8e7d6c5b4a",
+  "generation_id": "gen-0001",
+  "model": "claude-opus-5-thinking",
+  "model_id": "claude-opus-5",
+  "cursor_version": "1.7.2",
+  "workspace_roots": ["/Users/dev/code/agent_notifier"],
+  "user_email": "dev@example.com",
+  "transcript_path": "/tmp/cursor-transcript-conv-9f8e.jsonl",
+  "command": "rm -rf build && npm run deploy",
+  "cwd": "/Users/dev/code/agent_notifier",
+  "sandbox": false
+}
