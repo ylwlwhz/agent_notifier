@@ -225,20 +225,58 @@ delete 掉会被重新灌回来，用例就会真的发卡到飞书并阻塞几�
 
 #### 兜底：把提问引导成「正文 + 结束本轮」
 
-既然选择题事后无从补救，就别让 agent 走到那一步。`sessionStart` 是唯一能改变 agent
-行为的官方注入点——它的输出字段 `additional_context` 会进「会话的 initial system context」。
+既然选择题事后无从补救，就别让 agent 走到那一步。官方支持 `additional_context`
+（把一段文本塞进 agent 上下文）的 agent 事件**只有两个**，两个都要用上：
 
-于是 `handleSessionStart` 默认注入一条约定（`QUESTION_STEER_CONTEXT`）：需要用户在若干
-方案之间做决定时，把选项编号写进正文并结束本轮。这样问题就落在 `stop` 卡上，而那张卡的
-输入框是我们完全掌控的链路——**把一个不可观测的交互，换成了一个已经跑通的交互**。
+| 事件 | 时机 | 覆盖谁 | 注入内容 |
+| --- | --- | --- | --- |
+| `sessionStart` | 新建会话时一次 | 新会话 | `QUESTION_STEER_CONTEXT`（完整版） |
+| `postToolUse` | 每次工具调用后 | **已经开着的会话** | `QUESTION_STEER_REMINDER`（精简版，按间隔复读） |
+
+注入的约定是：需要用户在若干方案之间做决定时，优先调 `ask_user`，没有就把选项编号写进
+正文并结束本轮。这样问题就落在 `stop` 卡上，而那张卡的输入框是我们完全掌控的链路——
+**把一个不可观测的交互，换成了一个已经跑通的交互**。
+
+**为什么光有 `sessionStart` 不够（2026-08-28 实测，这条是踩出来的）**：`sessionStart`
+只在**新建会话**时触发，「重开窗口」并不等于「新建会话」。在 GY_2 上给
+`sessionStart` / `afterAgentResponse` / `stop` 各挂一个探针，跨 19 小时抓到：同一个
+`conversation_id` 上 12 次 `afterAgentResponse` + 12 次 `stop`、**0 次 `sessionStart`**
+——期间既 Reload 过窗口，也经历了 Cursor 自升级重启 server（`cursor-server` 的 commit
+hash 都换了）。会话只要不新建，那一针就永远不会再打；即便打过，长会话也会被上下文压缩
+丢掉。表现就是「跑了一天的会话又弹回 IDE 选择题」。
+
+于是加了第二个注入点。`postToolUse` 是官方文档里除 `sessionStart` 之外**唯一**支持
+`additional_context` 的 agent 事件——`beforeSubmitPrompt` 只有 `continue` /
+`user_message`，`afterAgentThought` 明确写着「无输出字段」，`preToolUse` 只有 permission
+那几个。实测注入的文本会以 `<system_reminder>` 的形式紧跟在工具结果之后进入上下文
+（在本仓库自己的 Cursor 会话里验证的，口令原样回来了）。
+
+**另一条实测结论：`hooks.json` 是每次事件重读的，改完立刻生效，不需要 Reload 窗口。**
+上面那个探针是会话中途才注册进 `postToolUse` 的，下一次 Shell 调用就命中了。所以
+「远程机上 rsync 完新代码要不要让用户重开窗口」这个问题的答案是：不用。
+（但 `mcp.json` 不同——MCP 服务是窗口启动时拉起的，加/改服务确实要重开或在
+Settings → MCP 里刷新。别把这两件事混为一谈。）
 
 约束与注意：
 
-- 只对**新建**会话生效。已经开着的会话不受影响，改完要新开窗口才见效。
 - 官方明说 `sessionStart` 是 fire-and-forget、不阻塞 agent loop，所以别在这个 hook 里做
   任何耗时的事（发卡、等飞书都不行），拿到就回。
-- `is_background_agent` 为真时不注入：背后没人盯着 IDE。
-- 开关 `CURSOR_STEER_QUESTIONS`（默认开）。关掉就等于承认选择题永远无法远程作答。
+- `is_background_agent` 为真时不注入：背后没人盯着 IDE。`postToolUse` 的 payload 里
+  没有这个字段，判不了，但精简版文案对两种情形都成立（有 `ask_user` 就调、没有就正文列
+  选项），所以不必为它特设分支。
+- **复读必须有间隔**（`CURSOR_STEER_REARM_SEC`，默认 30 分钟，标记落在
+  `/tmp/cursor-steer-<sessionKey>.json`）。没有间隔就是每个工具调用都复读一遍，纯烧
+  token。标记写不进去时**不注入** —— 宁可这一会话没有引导，也不能退化成无限复读。
+- **`steerReminder` 必须在 `handleLive` 的实时摘要开关【之前】算**。这是两件不相干的
+  事：关掉 `FEISHU_LIVE_CAPTURE` 的人一样需要「选择题能远程作答」，写在早退之后就等于
+  被那个开关连带关掉了。
+- `postToolUse` 带 matcher（`Shell|Write|StrReplace|…`），所以纯读文件的回合不会补打。
+  刻意不放宽：放宽了 `Read`/`Grep` 也会涌进实时摘要卡。代价是「开局只读文件然后就提问」
+  这种回合覆盖不到，实践中极少。
+- 开关 `CURSOR_STEER_QUESTIONS`（默认开）同时管两个注入点。关掉就等于承认选择题永远
+  无法远程作答。
+- **引导是软约束，不是拦截。** 模型仍可能选择用 AskQuestion，官方没给否决它的口子
+  （见上一节）。所以 `ask_user` 那条 MCP 通路才是主解，引导只是提高它被走到的概率。
 
 兜底是 `cursor-stall-watch` 看门狗。选择题是**零事件**状态，唯一可观测的信号只有沉默，
 但沉默本身不足以判定——一条十分钟的编译命令同样是十分钟沉默。所以判据多了一条：

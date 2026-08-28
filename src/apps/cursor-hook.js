@@ -11,7 +11,7 @@
  *   preToolUse                                 同上（需 CURSOR_APPROVE_TOOLS 显式列名）
  *   stop / subagentStop                        完成卡 + 阻塞续写 → 回 followup_message
  *   afterAgentResponse                         助手正文，喂完成卡与实时摘要
- *   postToolUse                                实时执行摘要
+ *   postToolUse                                实时执行摘要 + 会话中途补打提问引导
  *   postToolUseFailure                         失败卡
  *
  * 超时一律回落到宿主本地行为，绝不把 Cursor 永久挂住（见 control-policy）。
@@ -32,6 +32,7 @@ const {
     timeoutDecision,
     renderHookOutput,
     QUESTION_STEER_CONTEXT,
+    QUESTION_STEER_REMINDER,
 } = require('../adapters/cursor/control-policy');
 const stallWatch = require('./cursor-stall-watch');
 const cards = require('./cursor-cards');
@@ -310,17 +311,50 @@ function describeDecision(responses, decision) {
 
 // ── 各类事件处理 ──────────────────────────────────────────────────────────────
 
+function steerMarkerPath(sessionKey) {
+    return sharedTmpPath(`cursor-steer-${sessionKey}.json`);
+}
+
+/** 记下「这个会话刚打过引导」。写不进去要让调用方知道，否则会变成每个事件都复读 */
+function markSteered(sessionKey) {
+    try {
+        fs.writeFileSync(steerMarkerPath(sessionKey), JSON.stringify({ ts: Date.now() }), 'utf8');
+        return true;
+    } catch { return false; }
+}
+
+/**
+ * 会话【中途】要不要补打一次提问引导。
+ *
+ * sessionStart 那一针只在新建会话时打一次，长会话拿不到：实测重载窗口、乃至 Cursor
+ * 自升级重启 server 都不会再触发 sessionStart（同一 conversation_id 上 12 次 stop、
+ * 0 次 sessionStart），而且打过的那针也会被上下文压缩丢掉。这就是「跑了一天的会话
+ * 又弹回 AskQuestion」的原因。
+ *
+ * 所以按会话 + 时间间隔在 postToolUse 上复读。间隔存在的意义是把 token 成本封顶：
+ * 没有它就等于每个工具调用都复读一遍。
+ */
+function steerReminder(event, config) {
+    if (!config.steerQuestions) return '';
+    try {
+        const { ts } = JSON.parse(fs.readFileSync(steerMarkerPath(event.sessionKey), 'utf8'));
+        if (Number.isFinite(ts) && Date.now() - ts < config.steerRearmMs) return '';
+    } catch { /* 没有标记 = 这个会话还没打过，照常打 */ }
+    return markSteered(event.sessionKey) ? QUESTION_STEER_REMINDER : '';
+}
+
 /**
  * 会话开始：把「提问形态」约定注入初始系统上下文。
  *
- * 这是唯一能救 IDE 交互式选择题的官方口子。选择题本身不触发任何 hook、也不结束本轮，
- * 事后无从补救；只能在会话开头就把它引导成「正文列选项 + 结束本轮」，让问题落到
- * stop 卡上——那条链路的输入框我们完全掌控（详见 control-policy 里的说明）。
+ * 选择题本身不触发任何 hook、也不结束本轮，事后无从补救；只能在会话开头就把它引导成
+ * 「调 ask_user 或正文列选项 + 结束本轮」，让问题落到我们掌控的链路上（详见
+ * control-policy 里的说明）。这一针只对新建会话有效，已开着的会话靠 steerReminder 补。
  */
 function handleSessionStart(event, config) {
     if (!config.steerQuestions) return {};
     // 后台 agent 背后没有人盯着 IDE，不存在「卡在选择题上等人点」的问题
     if (event.meta.isBackgroundAgent) return {};
+    markSteered(event.sessionKey);
     return { additional_context: QUESTION_STEER_CONTEXT };
 }
 
@@ -413,18 +447,24 @@ function handleResponse(event, config) {
 }
 
 function handleLive(event, config) {
+    // 引导要先算，且不能受实时摘要开关影响：关掉 FEISHU_LIVE_CAPTURE 的人一样需要
+    // 「选择题能远程作答」，这是两件不相干的事
+    const reminder = steerReminder(event, config);
+
     const capture = config.liveCapture;
-    if (!capture || (!capture.tools && !capture.results)) return {};
-    appendLive(event.sessionKey, {
-        type: 'tool',
-        tool: event.meta.toolName,
-        icon: event.meta.icon,
-        input: event.meta.inputSummary,
-        result: capture.results ? event.meta.output : '',
-        durationMs: event.meta.durationMs,
-        ...liveEnvelope(event),
-    });
-    return {};
+    if (capture && (capture.tools || capture.results)) {
+        appendLive(event.sessionKey, {
+            type: 'tool',
+            tool: event.meta.toolName,
+            icon: event.meta.icon,
+            input: event.meta.inputSummary,
+            result: capture.results ? event.meta.output : '',
+            durationMs: event.meta.durationMs,
+            ...liveEnvelope(event),
+        });
+    }
+
+    return reminder ? { additional_context: reminder } : {};
 }
 
 // ── 主流程 ───────────────────────────────────────────────────────────────────
@@ -511,6 +551,9 @@ module.exports = {
     handleFailure,
     handleResponse,
     handleLive,
+    steerReminder,
+    steerMarkerPath,
+    markSteered,
     liveBufferPath,
     lastResponsePath,
     recordLastResponse,

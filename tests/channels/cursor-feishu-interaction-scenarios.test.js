@@ -399,12 +399,16 @@ test('describeDecision 按裁决给出对应的收敛文案与配色', () => {
 
 // ── sessionStart：把选择题引导成「可远程作答」的形态 ──────────────────────────
 
-test('sessionStart 注入提问形态约定；关掉开关就什么都不注入', () => {
+test('sessionStart 注入提问形态约定；关掉开关就什么都不注入', (t) => {
     const event = translateCursorHook({
         hook_event_name: 'sessionStart',
         session_id: 'conv-steer-1',
         is_background_agent: false,
         composer_mode: 'agent',
+    });
+    // 注入会顺手记下「这个会话打过针了」，标记落在共享 /tmp 里，用例得自己收拾
+    t.after(() => {
+        try { fs.unlinkSync(cursorHook.steerMarkerPath(event.sessionKey)); } catch { /* 没写成 */ }
     });
 
     const on = cursorHook.handleSessionStart(event, { steerQuestions: true });
@@ -421,6 +425,60 @@ test('后台 agent 不注入：背后没人盯着 IDE，不存在卡在选择题
         is_background_agent: true,
     });
     assert.deepEqual(cursorHook.handleSessionStart(event, { steerQuestions: true }), {});
+});
+
+// ── postToolUse：给「已经开着的会话」补打引导 ─────────────────────────────────
+//
+// sessionStart 只对新建会话生效。实测重载窗口、Cursor 自升级重启 server 都不会再触发它
+// （同一 conversation_id 上 12 次 stop、0 次 sessionStart），所以长会话必须有第二个注入点。
+
+/** 造一个 postToolUse 事件，并保证测试结束时清掉它在 /tmp 里的标记 */
+function toolEvent(t, conversationId) {
+    const event = translateCursorHook({
+        hook_event_name: 'postToolUse',
+        conversation_id: conversationId,
+        tool_name: 'Shell',
+        tool_input: { command: 'ls' },
+    });
+    t.after(() => {
+        try { fs.unlinkSync(cursorHook.steerMarkerPath(event.sessionKey)); } catch { /* 本来就没写成 */ }
+    });
+    return event;
+}
+
+test('同一会话隔一段时间复读一次引导，间隔内不重复', (t) => {
+    const event = toolEvent(t, 'conv-rearm-000001');
+    const config = { steerQuestions: true, steerRearmMs: 60000 };
+
+    assert.match(cursorHook.steerReminder(event, config), /ask_user/);
+    // 间隔内再来：不能每个工具调用都复读一遍，那是纯 token 浪费
+    assert.equal(cursorHook.steerReminder(event, config), '');
+    // 间隔到了：长会话里那一针会被上下文压缩丢掉，所以必须能重新打
+    assert.match(cursorHook.steerReminder(event, { ...config, steerRearmMs: 0 }), /ask_user/);
+
+    assert.equal(cursorHook.steerReminder(event, { ...config, steerQuestions: false }), '');
+});
+
+test('sessionStart 打过针之后，紧接着的工具调用不复读', (t) => {
+    const conversationId = 'conv-rearm-000002';
+    const start = translateCursorHook({ hook_event_name: 'sessionStart', session_id: conversationId });
+    const tool = toolEvent(t, conversationId);
+
+    cursorHook.handleSessionStart(start, { steerQuestions: true });
+    assert.equal(cursorHook.steerReminder(tool, { steerQuestions: true, steerRearmMs: 60000 }), '');
+});
+
+test('实时摘要全关时照样补打引导：这是两件不相干的事', (t) => {
+    const event = toolEvent(t, 'conv-rearm-000003');
+    const out = cursorHook.handleLive(event, {
+        steerQuestions: true,
+        steerRearmMs: 60000,
+        liveCapture: { tools: false, results: false },
+    });
+
+    assert.match(out.additional_context, /不要用 AskQuestion/);
+    // 摘要关着就不该落盘，否则关掉开关等于没关
+    assert.equal(fs.existsSync(cursorHook.liveBufferPath(event.sessionKey)), false);
 });
 
 // ── 心跳：只在「说完话」之后武装看门狗 ────────────────────────────────────────
