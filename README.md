@@ -127,16 +127,32 @@ does **not end the turn**, so no completion card is sent. From your phone you ca
 question nor answer it — the conversation just sits there. None of Cursor's 18 agent events means
 "the agent is waiting on the user", so there is nothing to react to after the fact.
 
-So this repo **routes around it**: at `sessionStart` (the only official injection point that can
-change agent behaviour) it injects a convention telling the agent to number its options in plain
-prose and end the turn instead. The question then lands on the completion card, whose input box
-already works remotely. Toggle with `CURSOR_STEER_QUESTIONS` (on by default); it only affects
-**newly created** conversations.
+So this repo **routes around it** by injecting a convention into the agent's context: when you
+need to decide something, call `ask_user` (the MCP tool that sends a Feishu card and blocks for
+your tap); if that tool is unavailable, number the options in plain prose and end the turn. The
+question then lands on the completion card, whose input box already works remotely. Toggle with
+`CURSOR_STEER_QUESTIONS` (on by default).
 
-If the agent uses the widget anyway, the `cursor-stall-watch` watchdog sends a "probably waiting
-on you" alert after 3 minutes of silence (`CURSOR_STALL_ALERT_SEC`) telling you to go back to the
-IDE. That card deliberately has no input box — no hook is waiting at that point, so an input box
-would be a lie.
+The injection uses **two** entry points, because those are the only agent events that support
+`additional_context`:
+
+- `sessionStart` — full text, once per newly created conversation.
+- `postToolUse` — a condensed reminder, repeated at most once per
+  `CURSOR_STEER_REARM_SEC` (30 minutes by default) per conversation. **This one is what covers
+  already-open conversations**: `sessionStart` fires only when a conversation is created, and
+  neither reloading the window nor Cursor upgrading itself triggers it again (measured: 12 `stop`
+  events and zero `sessionStart` on one conversation). Even a shot that did land gets dropped by
+  context compaction, which is why long-lived conversations drift back to the widget.
+
+`hooks.json` is re-read on every event, so edits take effect immediately with **no window
+reload**. `mcp.json` is different: adding or changing an MCP server does require reopening the
+window or refreshing under Settings → MCP.
+
+Steering is a soft constraint, not an interception — the model may still use the widget, and
+Cursor offers no way to veto it. When that happens the `cursor-stall-watch` watchdog sends a
+"probably waiting on you" alert after 15 minutes of silence (`CURSOR_STALL_ALERT_SEC`) telling
+you to go back to the IDE. That card deliberately has no input box — no hook is waiting at that
+point, so an input box would be a lie.
 
 #### Sessions connected to a server over Remote-SSH
 

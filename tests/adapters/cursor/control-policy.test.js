@@ -162,8 +162,25 @@ test('输出只保留该事件支持的字段（多余字段会被 Cursor 判为
 
     // 空值不该出现在输出里：followup_message 为空串等于「不续写」
     assert.deepEqual(renderHookOutput('stop', { followup_message: '' }), {});
-    // 只读事件没有可用输出字段
-    assert.deepEqual(renderHookOutput('postToolUse', { additional_context: 'x' }), {});
+    // 真正没有输出字段的只读事件
+    assert.deepEqual(renderHookOutput('afterAgentResponse', { additional_context: 'x' }), {});
+});
+
+test('postToolUse 放行 additional_context —— 会话中途补打引导的唯一通道', () => {
+    assert.deepEqual(
+        renderHookOutput('postToolUse', {
+            additional_context: '提问引导',
+            // 官方支持但本仓库不用：我们不改工具结果，放行了迟早被误用
+            updated_mcp_tool_output: { modified: 'x' },
+            permission: 'allow',
+        }),
+        { additional_context: '提问引导' }
+    );
+});
+
+test('引导复读间隔默认 30 分钟，可调', () => {
+    assert.equal(parseCursorControlConfig({}).steerRearmMs, 1800000);
+    assert.equal(parseCursorControlConfig({ CURSOR_STEER_REARM_SEC: '60' }).steerRearmMs, 60000);
 });
 
 test('CURSOR_NOTIFY_ENABLED=0 时整体停用', () => {
