@@ -9,14 +9,48 @@
  *     否则它只会重试或干等，用户在手机上还是什么都拿不到
  */
 
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+// 必须在 require 之前改：session-state / decision-bridge 都是模块加载时按 env 定好路径的单例。
+// 不改的话这个文件会往真实的 /tmp 决策目录和仓库里的 session-state.json 写东西。
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'an-ask-mcp-'));
+process.env.AGENT_NOTIFIER_STATE = path.join(TMP, 'session-state.json');
+process.env.AGENT_NOTIFIER_DECISIONS = path.join(TMP, 'decisions');
+
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { spawn } = require('child_process');
-const path = require('path');
 
 const mcp = require('../../src/apps/cursor-ask-mcp');
+const { decisionBridge } = require('../../src/lib/decision-bridge');
+
+test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
 const SERVER = path.join(__dirname, '..', '..', 'src', 'apps', 'cursor-ask-mcp.js');
+
+/**
+ * 只截走本模块写到 stdout 的 JSON-RPC 行，其余（node:test 自己的报告输出）原样放行。
+ *
+ * 一定不能整个吞掉 process.stdout.write：实测那样会把 runner 的报告一起吃掉，
+ * 表现是「明明注册了 19 个用例，报告里只剩 7 个」，而且不报任何错。
+ */
+function captureRpc() {
+    const lines = [];
+    const raw = process.stdout.write.bind(process.stdout);
+    process.stdout.write = (chunk, enc, cb) => {
+        const text = String(chunk);
+        if (text.startsWith('{"jsonrpc"')) {
+            lines.push(text);
+            if (typeof cb === 'function') cb();
+            return true;
+        }
+        return raw(chunk, enc, cb);
+    };
+    lines.restore = () => { process.stdout.write = raw; };
+    return lines;
+}
 
 /** 起一个真实子进程，喂几行 JSON-RPC，收集 stdout 上的响应 */
 function roundtrip(requests, { timeoutMs = 8000 } = {}) {
@@ -137,12 +171,12 @@ test('时长文案：不足一小时按分钟，超过按小时', () => {
     assert.equal(mcp.humanDuration(43200 * 1000), '12 小时');
 });
 
-test('总窗口默认 12 小时，单段默认 50 分钟（绕开 IDE 的 60 分钟上限）', () => {
+test('总窗口默认 24 小时（与完成卡对齐），单段默认 50 分钟（绕开 60 分钟硬顶）', () => {
     const keys = ['CURSOR_ASK_TIMEOUT_SEC', 'CURSOR_ASK_CHUNK_SEC'];
     const saved = {};
     for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
     try {
-        assert.equal(mcp.timeoutMs(), 43200 * 1000);
+        assert.equal(mcp.timeoutMs(), 86400 * 1000);
         assert.equal(mcp.chunkMs(), 3000 * 1000);
 
         process.env.CURSOR_ASK_TIMEOUT_SEC = '120';
@@ -150,7 +184,7 @@ test('总窗口默认 12 小时，单段默认 50 分钟（绕开 IDE 的 60 分
         assert.equal(mcp.chunkMs(), 120 * 1000, '分段不该比总窗口还长');
 
         process.env.CURSOR_ASK_TIMEOUT_SEC = '0';
-        assert.equal(mcp.timeoutMs(), 43200 * 1000, '非法值退回默认，不能变成 0 等待');
+        assert.equal(mcp.timeoutMs(), 86400 * 1000, '非法值退回默认，不能变成 0 等待');
     } finally {
         for (const k of keys) {
             if (saved[k] === undefined) delete process.env[k];
@@ -163,4 +197,141 @@ test('续等：pending_id 不存在时给出可执行的退路，而不是抛异
     const text = await mcp.waitChunk('cursorask_not_here');
     assert.match(text, /已经结束或不存在/);
     assert.match(text, /写进正文/);
+});
+
+test('单段永不顶到客户端 60 分钟硬顶（撞上就是 -32001，用户只看到「工具失败」）', () => {
+    const keys = ['CURSOR_ASK_TIMEOUT_SEC', 'CURSOR_ASK_CHUNK_SEC'];
+    const saved = {};
+    for (const k of keys) { saved[k] = process.env[k]; delete process.env[k]; }
+    try {
+        process.env.CURSOR_ASK_CHUNK_SEC = '7200'; // 有人手配 2 小时
+        assert.equal(mcp.chunkMs(), mcp.CLIENT_MAX_CALL_MS - 5 * 60 * 1000);
+    } finally {
+        for (const k of keys) {
+            if (saved[k] === undefined) delete process.env[k];
+            else process.env[k] = saved[k];
+        }
+    }
+});
+
+test('心跳间隔默认 20s，且不允许配得比 120s 的 idle 上限还长', () => {
+    const saved = process.env.CURSOR_ASK_HEARTBEAT_SEC;
+    try {
+        delete process.env.CURSOR_ASK_HEARTBEAT_SEC;
+        assert.equal(mcp.heartbeatMs(), 20 * 1000);
+
+        process.env.CURSOR_ASK_HEARTBEAT_SEC = '600';
+        assert.equal(mcp.heartbeatMs(), mcp.CLIENT_IDLE_TIMEOUT_MS / 2, '配长了必须夹回来，否则等于没心跳');
+
+        process.env.CURSOR_ASK_HEARTBEAT_SEC = 'abc';
+        assert.equal(mcp.heartbeatMs(), 20 * 1000);
+    } finally {
+        if (saved === undefined) delete process.env.CURSOR_ASK_HEARTBEAT_SEC;
+        else process.env.CURSOR_ASK_HEARTBEAT_SEC = saved;
+    }
+});
+
+test('没拿到 progressToken 就没法续命，单段必须退化到 idle 上限之内', () => {
+    // 有 token：靠心跳撑满 50 分钟
+    assert.equal(mcp.sliceMsFor(1), mcp.chunkMs());
+    assert.equal(mcp.sliceMsFor(0), mcp.chunkMs(), 'token 可以是数字 0，别被假值坑了');
+    // 没 token：抢在 120 秒判死之前把控制权还给 agent
+    assert.equal(mcp.sliceMsFor(undefined), mcp.NO_TOKEN_CHUNK_MS);
+    assert.equal(mcp.sliceMsFor(null), mcp.NO_TOKEN_CHUNK_MS);
+    assert.ok(mcp.NO_TOKEN_CHUNK_MS < mcp.CLIENT_IDLE_TIMEOUT_MS);
+});
+
+test('心跳原样回客户端给的 progressToken；没 token 时不发（发了是协议噪音）', () => {
+    const sent = captureRpc();
+    try {
+        assert.equal(mcp.sendProgress(7, 3, '还在等'), true);
+        assert.equal(mcp.sendProgress(undefined, 1, '还在等'), false);
+        assert.equal(mcp.sendProgress(null, 1, '还在等'), false);
+    } finally {
+        sent.restore();
+    }
+
+    assert.equal(sent.length, 1);
+    const msg = JSON.parse(sent[0]);
+    assert.equal(msg.method, 'notifications/progress');
+    assert.equal(msg.params.progressToken, 7);
+    assert.equal(msg.params.progress, 3);
+    assert.equal(msg.id, undefined, '通知不能带 id');
+});
+
+test('心跳期间真的等满一段：wait 被 heartbeat 包着也照样拿到落盘的答案', async () => {
+    const id = 'cursorask_hb_1';
+    decisionBridge.open(id, { host: 'cursor', event: 'mcp_ask_user', timeoutMs: 60000 });
+
+    const savedBeat = process.env.CURSOR_ASK_HEARTBEAT_SEC;
+    process.env.CURSOR_ASK_HEARTBEAT_SEC = '0.05'; // 50ms，逼出至少一次心跳
+    const sent = captureRpc();
+
+    mcp.pending.set(id, {
+        decisionId: id,
+        stateKey: 'k',
+        messageId: null,
+        client: null,
+        question: 'A 还是 B',
+        options: ['A', 'B'],
+        deadline: Date.now() + 5000,
+        totalMs: 5000,
+    });
+
+    try {
+        setTimeout(() => decisionBridge.resolve(id, { answer: 'B' }), 200);
+        const text = await mcp.waitChunk(id, 42);
+        assert.match(text, /第 2 个选项：B/);
+    } finally {
+        sent.restore();
+        mcp.pending.delete(id);
+        decisionBridge.close(id);
+        if (savedBeat === undefined) delete process.env.CURSOR_ASK_HEARTBEAT_SEC;
+        else process.env.CURSOR_ASK_HEARTBEAT_SEC = savedBeat;
+    }
+
+    const beats = sent.map((l) => JSON.parse(l)).filter((m) => m.method === 'notifications/progress');
+    assert.ok(beats.length >= 1, '等待期间必须发出心跳，否则 120 秒后被判死');
+    assert.equal(beats[0].params.progressToken, 42);
+});
+
+test('客户端取消后立刻收手：不再干等，也不把答案吞进一个没人收的返回值', async () => {
+    const id = 'cursorask_cancel_1';
+    decisionBridge.open(id, { host: 'cursor', event: 'mcp_ask_user', timeoutMs: 60000 });
+
+    mcp.pending.set(id, {
+        decisionId: id,
+        stateKey: 'k',
+        messageId: null,
+        client: null,
+        question: 'A 还是 B',
+        options: ['A', 'B'],
+        deadline: Date.now() + 60000,
+        totalMs: 60000,
+    });
+    mcp.byRequestId.set('11', id);
+
+    try {
+        setTimeout(() => {
+            assert.equal(mcp.cancelRequest(11), true);
+        }, 150);
+        const started = Date.now();
+        const text = await mcp.waitChunk(id, 5);
+        assert.match(text, /已被 IDE 取消/);
+        assert.ok(Date.now() - started < 5000, '取消必须当场生效，不能等到分段到期');
+        assert.equal(mcp.pending.has(id), false, '取消后必须收摊，别留下永久有效的卡');
+    } finally {
+        mcp.pending.delete(id);
+        mcp.byRequestId.delete('11');
+        decisionBridge.close(id);
+    }
+});
+
+test('协议：notifications/cancelled 是通知，不能回响应，也不能崩', async () => {
+    const msgs = await roundtrip([
+        { jsonrpc: '2.0', method: 'notifications/cancelled', params: { requestId: 99, reason: 'timeout' } },
+        { jsonrpc: '2.0', id: 5, method: 'ping' },
+    ]);
+    assert.equal(msgs.length, 1);
+    assert.equal(msgs[0].id, 5);
 });

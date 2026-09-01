@@ -72,12 +72,20 @@ function clipBody(text) {
     return '…（仅显示最新部分）\n\n' + raw.slice(-BODY_MAX);
 }
 
+/** 人类可读时长：窗口拉到 12/24 小时后，「43200s」这种写法没人能一眼读懂 */
+function humanWindow(ms) {
+    const sec = Math.round((ms || 0) / 1000);
+    if (sec < 120) return `${sec} 秒`;
+    if (sec < 3600) return `${Math.round(sec / 60)} 分钟`;
+    const h = Math.round(sec / 360) / 10;
+    return `${h} 小时`;
+}
+
 /** 等待提示：把「等多久、超时后会怎样」写在卡上，避免用户以为点了没用 */
 function waitHint(timeoutMs, fallbackText) {
-    const sec = Math.round((timeoutMs || 0) / 1000);
     return {
         tag: 'markdown',
-        content: `<font color='grey'>⏳ 等待飞书回应，${sec}s 内无人操作则${fallbackText}</font>`,
+        content: `<font color='grey'>⏳ 等待飞书回应，${humanWindow(timeoutMs)}内无人操作则${fallbackText}</font>`,
     };
 }
 
@@ -558,6 +566,7 @@ function buildLiveCard({ segments, capture, model, projectName }) {
 }
 
 module.exports = {
+    humanWindow,
     buildApprovalCard,
     buildFollowupCard,
     buildFailureCard,

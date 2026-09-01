@@ -168,11 +168,15 @@ class DecisionBridge {
      * 阻塞等待裁决。超时返回 null —— 调用方必须据此回落到宿主本地行为
      * （审批回 permission:'ask' 让 Cursor 自己弹窗，followup 回空对象让本轮正常结束），
      * 绝不能让 Cursor 永久卡在 hook 上。
+     *
+     * shouldAbort 给「等着的那一方自己先没了」的场景用（例如 MCP 客户端取消了
+     * 这次 tools/call）：返回 true 就当场收手，同样回 null。
      */
-    async wait(id, { timeoutMs = 180000, pollMs = DEFAULT_POLL_MS } = {}) {
+    async wait(id, { timeoutMs = 180000, pollMs = DEFAULT_POLL_MS, shouldAbort } = {}) {
         const deadline = Date.now() + timeoutMs;
         const fastUntil = Date.now() + FAST_POLL_WINDOW_MS;
         for (;;) {
+            if (shouldAbort && shouldAbort()) return null;
             const decision = this.read(id);
             if (decision) return decision;
             const remaining = deadline - Date.now();
