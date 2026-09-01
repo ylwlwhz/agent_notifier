@@ -68,7 +68,10 @@ function install() {
     writeMcpFile(config);
     console.log(`  ${current ? '~ 更新' : '+ 添加'} MCP 服务: ${SERVER_NAME}`);
     console.log(`[agent-notifier] 已写入 ${mcpPath}`);
-    console.log('  提示：Cursor 需要重新加载 MCP 配置（重开窗口，或在 Settings → MCP 里刷新）才会看到 ask_user');
+    // mcp.json 是热加载的（实测：写完 6 秒内新服务就起来了，同一会话当场可调），
+    // 所以这里不必让用户重开窗口。但常驻进程只在【条目】变化时才换新：
+    // 光升级代码不会重启它，那种情况得动一下条目或重开窗口。
+    console.log('  提示：Cursor 会自动加载（约几秒）；若只升级了代码而没改这份配置，需重开窗口才会换新进程');
 }
 
 function remove() {

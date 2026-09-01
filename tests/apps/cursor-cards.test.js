@@ -56,8 +56,16 @@ test('审批卡把超时后的去向写在卡上，避免用户以为点了没�
     const card = cards.buildApprovalCard({ event, stateKey: 'k1', timeoutMs: 90000 });
     const hint = collect(card.body.elements, 'markdown').map((e) => e.content).join('\n');
 
-    assert.match(hint, /90s/);
+    assert.match(hint, /90 秒/);
     assert.match(hint, /回落到 Cursor 本地弹窗/);
+});
+
+test('等待窗口按人话写：12 小时不能渲染成 43200s，那没人读得懂', () => {
+    assert.equal(cards.humanWindow(90 * 1000), '90 秒');
+    assert.equal(cards.humanWindow(180 * 1000), '3 分钟');
+    assert.equal(cards.humanWindow(43200 * 1000), '12 小时');
+    assert.equal(cards.humanWindow(86400 * 1000), '24 小时');
+    assert.equal(cards.humanWindow(5400 * 1000), '1.5 小时');
 });
 
 test('审批卡回调映射：允许=allow，拒绝会把理由带给 agent', () => {

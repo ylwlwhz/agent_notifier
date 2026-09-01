@@ -135,8 +135,15 @@ IDE 的交互式选择题（`AskQuestion`）是个死角：它**不触发任何 
   重开窗口、甚至 Cursor 自升级重启都不会再触发它（实测同一会话 12 次 `stop`、0 次
   `sessionStart`），而且打过的那针也会被上下文压缩丢掉，于是长会话又会退回去弹选择题。
 
-`hooks.json` 是每次事件重读的，改完立刻生效，**不用重开窗口**；`mcp.json` 不同，
-加/改 MCP 服务要重开窗口或在 Settings → MCP 里刷新。
+`hooks.json` 和 `mcp.json` 都是热加载的，改完立刻生效，**不用重开窗口**。但两者有个
+要紧的区别：hooks 每次事件重新 spawn，天然拿到新代码；MCP 服务是常驻进程，**只改代码
+不会让它重启**，要动一下它在 `mcp.json` 里的条目才会换新（升级完记得做这一步）。
+
+`ask_user` 的等待窗口还有一道容易被忽略的坎：Cursor 的 MCP 客户端**连接上 120 秒没动静
+就把这次调用判死**（`MCP error -32001`），跟你把总窗口配多大无关。所以等待期间会每
+`CURSOR_ASK_HEARTBEAT_SEC`（默认 20 秒）发一次 `notifications/progress` 把它的 idle
+计时器顶回去；单次调用另有 60 分钟硬顶，靠 `ask_user_wait` 分段续等绕开。总窗口
+`CURSOR_ASK_TIMEOUT_SEC` 默认 24 小时，与完成卡的续写窗口一致。
 
 引导是软约束而非拦截：模型仍可能用选择题，官方没给否决它的口子。此时
 `cursor-stall-watch` 看门狗会在静止超过 15 分钟（`CURSOR_STALL_ALERT_SEC`）时发一张

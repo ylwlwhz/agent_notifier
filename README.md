@@ -144,9 +144,18 @@ The injection uses **two** entry points, because those are the only agent events
   events and zero `sessionStart` on one conversation). Even a shot that did land gets dropped by
   context compaction, which is why long-lived conversations drift back to the widget.
 
-`hooks.json` is re-read on every event, so edits take effect immediately with **no window
-reload**. `mcp.json` is different: adding or changing an MCP server does require reopening the
-window or refreshing under Settings → MCP.
+Both `hooks.json` and `mcp.json` are hot-reloaded, so edits take effect immediately with **no
+window reload**. One important difference: hooks are spawned fresh on every event and therefore
+always run the latest code, while an MCP server is a long-lived process that **does not restart
+when you only change its code** — touch its entry in `mcp.json` to cycle it after an upgrade.
+
+`ask_user`'s waiting window has one more trap worth knowing: Cursor's MCP client kills a tool
+call after **120 seconds of silence on the connection** (`MCP error -32001`), no matter how large
+a total window you configure. So while waiting, the server emits a `notifications/progress`
+heartbeat every `CURSOR_ASK_HEARTBEAT_SEC` (20 seconds by default) to reset that idle timer. A
+separate 60-minute per-call ceiling still applies, which is what `ask_user_wait` chunking is for.
+The total window, `CURSOR_ASK_TIMEOUT_SEC`, defaults to 24 hours, matching the completion card's
+follow-up window.
 
 Steering is a soft constraint, not an interception — the model may still use the widget, and
 Cursor offers no way to veto it. When that happens the `cursor-stall-watch` watchdog sends a

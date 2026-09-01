@@ -9,13 +9,25 @@
  * 作为工具结果交回 agent —— 不需要「deny + agent_message」那种歪招，agent 拿到的就是
  * 一次正常的工具结果。
  *
- * 唯一的硬约束是超时：IDE 里单次 tools/call 上限约 60 分钟（CLI/ACP 那条路是硬编码 60s，
- * 且 notifications/progress 不会续期，官方论坛已确认）。
+ * 超时是这条路上最容易踩空的地方。Cursor 的 MCP 客户端有【两道】时限，它自己的日志
+ * （mcpMeta.event=mcp_tool_call_timeout）把常量写得很清楚：
  *
- * 但「人在外面」需要的窗口远大于一小时，所以这里用【分段续等】绕开那个上限：
- * 每次调用只阻塞 CURSOR_ASK_CHUNK_SEC（默认 50 分钟，留 10 分钟余量），到点若还没答案
- * 就返回一个 pending_id，并明确要求 agent 立刻再调 ask_user_wait 继续等 —— 单次调用
- * 永不触碰 60 分钟上限，总窗口可达 CURSOR_ASK_TIMEOUT_SEC（默认 12 小时）。
+ *   idleTimeoutMs     = 120000    连接上 120 秒没动静，这次 tools/call 就被判死
+ *                                 （MCP error -32001），与总时长无关
+ *   maxTotalTimeoutMs = 3600000   单次调用的硬顶，心跳也顶不过去
+ *
+ * 所以【等待期间必须发心跳】：每 CURSOR_ASK_HEARTBEAT_SEC 秒回一条 notifications/progress
+ * （带客户端在 tools/call 的 _meta.progressToken 里给的那个 token），idle 计时器就会被
+ * 重置。这是实测过的：不发心跳一律死在第 120 秒；每 20 秒发一次，单次调用活到 300 秒仍
+ * 正常返回、且客户端没发 notifications/cancelled。
+ *
+ * 心跳只解决 idle，解决不了 60 分钟硬顶，所以仍然要【分段续等】：每次调用最多阻塞
+ * CURSOR_ASK_CHUNK_SEC（默认 50 分钟，给硬顶留 10 分钟余量），到点若还没答案就返回一个
+ * pending_id，并明确要求 agent 立刻再调 ask_user_wait 继续等 —— 总窗口可达
+ * CURSOR_ASK_TIMEOUT_SEC（默认 24 小时）。
+ *
+ * 万一客户端没给 progressToken（心跳无处可发），单段就退化成 90 秒，抢在 idle 判死之前
+ * 把控制权交还 agent，让它靠 ask_user_wait 接力 —— 慢，但不会静默失联。
  *
  * 分段之所以安全，是因为裁决走的是【文件】而不是活的通道：用户在两段之间回答，答案落盘，
  * 下一段 wait() 读文件照样拿到，不会漏。
@@ -55,13 +67,26 @@ const SERVER_NAME = 'agent-notifier-ask';
 const SERVER_VERSION = '1.0.0';
 const FALLBACK_PROTOCOL = '2025-06-18';
 
-// 总等待窗口，默认 12 小时：人在外面时一小时远远不够。
-const DEFAULT_TIMEOUT_SEC = 43200;
+// 总等待窗口，默认 24 小时 —— 与完成卡的续写窗口（CURSOR_FOLLOWUP_TIMEOUT_SEC）对齐。
+// 两条通路给的窗口不一致会很难解释：同一个人、同一部手机，凭什么选择题只能等半天。
+const DEFAULT_TIMEOUT_SEC = 86400;
 
 // 单次 tools/call 只阻塞这么久，默认 50 分钟。
 // 别贴着 60 分钟调 —— IDE 的上限就在那附近，撞上时 Cursor 报 MCP error -32001，
 // 用户只会看到「工具失败」，而不是「还在等你」。
 const DEFAULT_CHUNK_SEC = 3000;
+
+// 心跳间隔，默认 20 秒。客户端的 idle 上限是 120 秒，取它的六分之一：
+// 网络文件系统上偶尔卡一两拍也还有余量。
+const DEFAULT_HEARTBEAT_SEC = 20;
+
+// 客户端侧的两个硬常量（来自 Cursor 自己的 mcpMeta 日志，不是猜的）
+const CLIENT_IDLE_TIMEOUT_MS = 120 * 1000;
+const CLIENT_MAX_CALL_MS = 60 * 60 * 1000;
+// 单段与硬顶之间留的余量：网络往返 + agent 侧调度都要时间
+const CALL_MARGIN_MS = 5 * 60 * 1000;
+// 拿不到 progressToken 时的单段上限：必须明显短于 idle 上限
+const NO_TOKEN_CHUNK_MS = 90 * 1000;
 
 function timeoutMs() {
     const n = parseFloat(process.env.CURSOR_ASK_TIMEOUT_SEC);
@@ -71,13 +96,31 @@ function timeoutMs() {
 function chunkMs() {
     const n = parseFloat(process.env.CURSOR_ASK_CHUNK_SEC);
     const chunk = (Number.isFinite(n) && n > 0 ? n : DEFAULT_CHUNK_SEC) * 1000;
-    // 分段不该比总窗口还长
-    return Math.min(chunk, timeoutMs());
+    // 分段既不该比总窗口长，也不能顶到客户端的单次调用硬顶
+    return Math.min(chunk, timeoutMs(), CLIENT_MAX_CALL_MS - CALL_MARGIN_MS);
+}
+
+function heartbeatMs() {
+    const n = parseFloat(process.env.CURSOR_ASK_HEARTBEAT_SEC);
+    const beat = (Number.isFinite(n) && n > 0 ? n : DEFAULT_HEARTBEAT_SEC) * 1000;
+    // 配得比 idle 上限还长等于没配
+    return Math.min(beat, CLIENT_IDLE_TIMEOUT_MS / 2);
+}
+
+/** 本次调用能安全阻塞多久：有 token 才能靠心跳续命，否则只能抢在 idle 判死前返回 */
+function sliceMsFor(progressToken) {
+    return progressToken === undefined || progressToken === null
+        ? Math.min(NO_TOKEN_CHUNK_MS, timeoutMs())
+        : chunkMs();
 }
 
 // pending_id → 这一问的现场。MCP 服务进程在 Cursor 会话期间常驻，所以放内存里就够；
 // 进程真被重启了，那些卡也已经没人接了，用户点了会看到「未生效」——那是诚实的。
 const pending = new Map();
+
+// JSON-RPC 请求 id → pending_id。notifications/cancelled 只带请求 id，
+// 没这张表就无法知道该中止哪一次等待。
+const byRequestId = new Map();
 
 function log(...args) {
     console.error('[cursor-ask-mcp]', ...args);
@@ -94,6 +137,20 @@ function reply(id, result) {
     send({ jsonrpc: '2.0', id, result });
 }
 
+/**
+ * 心跳。这不是「进度展示」，而是保命信号：客户端 120 秒收不到任何东西就把本次
+ * tools/call 判死。progressToken 是客户端在 tools/call 的 _meta 里给的，必须原样回。
+ */
+function sendProgress(progressToken, progress, message) {
+    if (progressToken === undefined || progressToken === null) return false;
+    send({
+        jsonrpc: '2.0',
+        method: 'notifications/progress',
+        params: { progressToken, progress, message },
+    });
+    return true;
+}
+
 function replyError(id, code, message) {
     if (id === undefined || id === null) return;
     send({ jsonrpc: '2.0', id, error: { code, message } });
@@ -104,7 +161,7 @@ function replyError(id, code, message) {
 const ASK_TOOL = {
     name: 'ask_user',
     description: [
-        '通过飞书卡片向用户提问，并【阻塞等待】他的回答（默认最多 50 分钟）。',
+        '通过飞书卡片向用户提问，并【阻塞等待】他的回答（单次最多 50 分钟，续等后总窗口 24 小时）。',
         '当你需要用户在若干方案之间做决定、或需要只有他才能提供的信息时，用这个工具。',
         '',
         '重要：不要使用 IDE 内置的交互式选择题组件（AskQuestion）——它不触发任何 hook，',
@@ -209,7 +266,7 @@ function noChannelGuidance(reason) {
     return `${reason}请把问题和候选项编号写进正文，然后结束本轮，让用户从完成卡回复。`;
 }
 
-async function askUser({ question, options = [], context = '' }) {
+async function askUser({ question, options = [], context = '', progressToken, requestId }) {
     const waitMs = timeoutMs();
 
     // 到这里才 require：这些模块（尤其飞书传输层）加载不便宜，
@@ -287,6 +344,7 @@ async function askUser({ question, options = [], context = '' }) {
 
     // 登记现场，之后每次 ask_user_wait 都在同一个 decisionId 上继续等
     const pendingId = decisionId;
+    if (requestId !== undefined && requestId !== null) byRequestId.set(String(requestId), pendingId);
     pending.set(pendingId, {
         decisionId,
         stateKey,
@@ -298,11 +356,14 @@ async function askUser({ question, options = [], context = '' }) {
         totalMs: waitMs,
     });
 
-    return waitChunk(pendingId);
+    return waitChunk(pendingId, progressToken);
 }
 
-/** 收摊：关掉决策通道、清掉通知、把卡片收敛成只读态 */
-async function finish(ask, answered) {
+/**
+ * 收摊：关掉决策通道、清掉通知、把卡片收敛成只读态。
+ * statusText 给调用方覆盖卡上那行状态（取消场景要说清「为什么没生效」）。
+ */
+async function finish(ask, answered, statusText) {
     const { decisionBridge } = require('../lib/decision-bridge');
     const { sessionState } = require('../lib/session-state');
     const cards = require('./cursor-cards');
@@ -320,9 +381,9 @@ async function finish(ask, answered) {
                 content: JSON.stringify(cards.buildSettledAskCard({
                     question: ask.question,
                     answered: !!answered,
-                    statusText: answered
+                    statusText: statusText || (answered
                         ? `✅ ${answered}`
-                        : '⏳ **已超时** — 未收到回答，已交回正文提问',
+                        : '⏳ **已超时** — 未收到回答，已交回正文提问'),
                 })),
             },
         });
@@ -332,12 +393,42 @@ async function finish(ask, answered) {
 }
 
 /**
- * 等一段（不超过 chunkMs），据结果返回：答案 / 续等指引 / 最终超时指引。
+ * 阻塞等一段，期间按 heartbeatMs 发心跳把客户端的 idle 计时器顶回去。
+ *
+ * 心跳失败（stdout 已断）就停发：这时候连接本身没了，继续发只是徒劳。
+ */
+async function waitWithHeartbeat(ask, sliceMs, progressToken) {
+    const { decisionBridge } = require('../lib/decision-bridge');
+    const beat = heartbeatMs();
+    let ticks = 0;
+
+    const timer = progressToken === undefined || progressToken === null ? null : setInterval(() => {
+        ticks += 1;
+        try {
+            sendProgress(progressToken, ticks, `等待用户在飞书上回答…已 ${Math.round(ticks * beat / 1000)}s`);
+        } catch (err) {
+            log('心跳发送失败，停止心跳:', err.message);
+            clearInterval(timer);
+        }
+    }, beat);
+
+    try {
+        return await decisionBridge.wait(ask.decisionId, {
+            timeoutMs: sliceMs,
+            shouldAbort: () => !!ask.cancelled,
+        });
+    } finally {
+        if (timer) clearInterval(timer);
+    }
+}
+
+/**
+ * 等一段（不超过 sliceMsFor(progressToken)），据结果返回：答案 / 续等指引 / 最终超时指引。
  *
  * 分段的正确性来自「裁决是文件」：用户在两段之间回答，答案落盘，下一段 wait() 照样读到。
  * 所以这里【不能】在段间收敛卡片，也不能关掉决策通道。
  */
-async function waitChunk(pendingId) {
+async function waitChunk(pendingId, progressToken) {
     const ask = pending.get(pendingId);
     if (!ask) {
         return noChannelGuidance(`pending_id=${pendingId} 已经结束或不存在（可能已被回答、已超时，或服务重启过）。`);
@@ -345,11 +436,21 @@ async function waitChunk(pendingId) {
 
     const { decisionBridge } = require('../lib/decision-bridge');
     const remaining = ask.deadline - Date.now();
-    const slice = Math.min(chunkMs(), Math.max(0, remaining));
+    const slice = Math.min(sliceMsFor(progressToken), Math.max(0, remaining));
 
     const decision = slice > 0
-        ? await decisionBridge.wait(ask.decisionId, { timeoutMs: slice })
+        ? await waitWithHeartbeat(ask, slice, progressToken)
         : decisionBridge.read(ask.decisionId); // 窗口已尽，最后瞄一眼免得错过刚落盘的答案
+
+    // 客户端已放弃这次调用（IDE 里被停止 / 撞上硬顶）：返回值没人收，
+    // 但卡片必须收敛，否则用户几小时后还在往一个死掉的调用里作答。
+    if (ask.cancelled) {
+        const late = describeAnswer(decisionBridge.read(ask.decisionId), ask.options);
+        await finish(ask, null, late
+            ? '⛔ **已取消** — 你的回答到得比 IDE 放弃等待更晚，没能交回；请从完成卡重发'
+            : '⛔ **已取消** — IDE 侧已终止这次提问');
+        return '本次提问已被 IDE 取消。';
+    }
 
     const answered = describeAnswer(decision, ask.options);
     if (answered) {
@@ -362,6 +463,17 @@ async function waitChunk(pendingId) {
 
     await finish(ask, null);
     return timeoutGuidance(ask.totalMs);
+}
+
+/** 客户端放弃某次 tools/call：中止对应的等待，让 waitChunk 去收摊 */
+function cancelRequest(requestId) {
+    const pendingId = byRequestId.get(String(requestId));
+    if (!pendingId) return false;
+    const ask = pending.get(pendingId);
+    if (!ask) return false;
+    ask.cancelled = true;
+    log(`客户端取消了请求 ${requestId}，中止 pending_id=${pendingId} 的等待`);
+    return true;
 }
 
 // ── JSON-RPC 分发 ────────────────────────────────────────────────────────────
@@ -382,6 +494,12 @@ async function handle(msg) {
         case 'initialized':
             return; // 通知，无需回应
 
+        case 'notifications/cancelled':
+            // 客户端放弃了某次调用。不处理的话我们会一直等到分段到期，
+            // 期间用户在飞书上的回答会被一个已经没人收的返回值吞掉。
+            cancelRequest(params?.requestId);
+            return;
+
         case 'ping':
             return reply(id, {});
 
@@ -399,13 +517,19 @@ async function handle(msg) {
             if (params.name === WAIT_TOOL.name && !String(args.pending_id || '').trim()) {
                 return reply(id, { isError: true, content: [{ type: 'text', text: 'pending_id 不能为空' }] });
             }
+            // 心跳要发给这个 token；客户端每次调用给的 token 都不同，不能缓存复用
+            const progressToken = params?._meta?.progressToken;
+            const pendingId = params.name === WAIT_TOOL.name ? String(args.pending_id) : null;
+            if (pendingId) byRequestId.set(String(id), pendingId);
             try {
                 const text = params.name === WAIT_TOOL.name
-                    ? await waitChunk(String(args.pending_id))
+                    ? await waitChunk(pendingId, progressToken)
                     : await askUser({
                         question: String(args.question),
                         options: args.options,
                         context: args.context ? String(args.context) : '',
+                        progressToken,
+                        requestId: id,
                     });
                 return reply(id, { content: [{ type: 'text', text }] });
             } catch (err) {
@@ -415,6 +539,8 @@ async function handle(msg) {
                     isError: true,
                     content: [{ type: 'text', text: noChannelGuidance(`远程提问失败（${err.message}）。`) }],
                 });
+            } finally {
+                byRequestId.delete(String(id));
             }
         }
 
@@ -452,6 +578,7 @@ module.exports = {
     protectStdout,
     askUser,
     waitChunk,
+    cancelRequest,
     describeAnswer,
     timeoutGuidance,
     pendingGuidance,
@@ -459,9 +586,17 @@ module.exports = {
     humanDuration,
     timeoutMs,
     chunkMs,
+    heartbeatMs,
+    sliceMsFor,
+    sendProgress,
     pending,
+    byRequestId,
     ASK_TOOL,
     WAIT_TOOL,
     DEFAULT_TIMEOUT_SEC,
     DEFAULT_CHUNK_SEC,
+    DEFAULT_HEARTBEAT_SEC,
+    CLIENT_IDLE_TIMEOUT_MS,
+    CLIENT_MAX_CALL_MS,
+    NO_TOKEN_CHUNK_MS,
 };
