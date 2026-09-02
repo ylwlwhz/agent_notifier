@@ -106,7 +106,6 @@ function parseCursorControlConfig(env = process.env) {
     const approvalEnabled = truthy(env.CURSOR_REMOTE_APPROVAL, false);
     return {
         enabled: truthy(env.CURSOR_NOTIFY_ENABLED, true),
-        notifyFailure: truthy(env.CURSOR_NOTIFY_FAILURE, true),
         notifyStop: truthy(env.CURSOR_NOTIFY_STOP, true),
         // 默认开：不开的话「选择题」这类交互永远无法远程作答（见 QUESTION_STEER_CONTEXT）
         steerQuestions: truthy(env.CURSOR_STEER_QUESTIONS, true),

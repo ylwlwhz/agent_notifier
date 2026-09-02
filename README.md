@@ -113,7 +113,7 @@ conversation has to be owned by this repo:
 | | Conversation opened in the IDE | Conversation launched from Feishu |
 |---|---|---|
 | Pipeline | hooks (`cursor-hook.js`) | cursor-agent CLI (`cursor-cli.js`) |
-| Notification cards | ✅ completion / failure / live summary | ✅ one card per turn, patched as it streams |
+| Notification cards | ✅ completion / live summary | ✅ one card per turn, patched as it streams |
 | Remote approval | ✅ blocks waiting for your tap | auto-allowed (unattended by design) |
 | **Reply anytime** | ❌ only at the instant a turn ends | ✅ **any time**, no timeout |
 | Send while running | ❌ | ✅ queued, runs after the current turn |
@@ -242,7 +242,8 @@ codex
 ```
 
 Cursor needs no wrapper function and no new terminal — once the hooks are installed, just use
-Cursor. Completion, tool-failure, and live-summary cards flow to Feishu automatically.
+Cursor. Completion and live-summary cards flow to Feishu automatically (a failed tool shows up
+as a step inside the live summary, not as a card of its own).
 
 ### 6. (Optional) Enable Cursor Remote Control
 
@@ -395,13 +396,17 @@ All three hosts share these semantics. Codex output comes from `~/.codex/session
 Cursor output comes straight from the hook payload (`postToolUse` carries `tool_input` and
 `tool_output`). Neither is inferred from terminal text.
 
+A failed tool (`postToolUseFailure`) is just another step in the same summary card — marked
+`❌`, expanded by default, with the error message in place of the output, and a red counter on
+the card header. There is no separate failure card: one red card per failed tool was noise, and
+dropping the event entirely would have made failed steps vanish from the summary.
+
 ### Cursor-Specific Settings
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CURSOR_NOTIFY_ENABLED` | `1` | Master switch; off means no Cursor cards at all |
 | `CURSOR_NOTIFY_STOP` | `1` | Send a completion card when a task ends |
-| `CURSOR_NOTIFY_FAILURE` | `1` | Send a failure card on tool errors (user interrupts don't count) |
 | `CURSOR_REMOTE_APPROVAL` | `0` | **Remote approval**: approve/deny Shell and MCP calls from Feishu |
 | `CURSOR_APPROVAL_TIMEOUT_SEC` | `180` | Approval wait cap; on timeout falls back to Cursor's own dialog |
 | `CURSOR_APPROVAL_MATCHER` | empty | JS regex; only ask about matching commands (empty = ask about all, noisy) |

@@ -486,19 +486,6 @@ function buildStallCard({ body, idleMs, projectName, model }) {
     });
 }
 
-// ── 失败卡（postToolUseFailure）─────────────────────────────────────────────
-
-function buildFailureCard({ event }) {
-    return card2({
-        template: 'red',
-        title: 'Cursor 工具失败',
-        elements: [
-            ...parseMarkdownToElements(event.message || '工具执行失败'),
-            footerFor(event),
-        ],
-    });
-}
-
 // ── 实时执行摘要卡（postToolUse + afterAgentResponse 聚合）───────────────────
 
 /** 命令/路径的单行预览：折叠面板标题只放一行，防止飞书里多行相互重叠 */
@@ -507,10 +494,15 @@ function toolPreview(step) {
     return first.length > 56 ? first.slice(0, 56) + '…' : first;
 }
 
-/** 单个工具 → 默认折叠面板：标题是图标+工具+命令首行，展开才看完整命令与结果 */
+/**
+ * 单个工具 → 默认折叠面板：标题是图标+工具+命令首行，展开才看完整命令与结果。
+ * 失败的那一步换成 ❌ 并默认展开——它不再有独立的失败卡，全靠这里被看见。
+ */
 function buildToolPanel(step, capture) {
     const preview = capture.tools ? toolPreview(step) : '';
-    const title = `${step.icon || '🔧'} ${step.tool}` + (preview ? `  ${preview}` : '');
+    const icon = step.failed ? '❌' : (step.icon || '🔧');
+    const label = step.failed ? `${step.tool} — ${step.failureReason || '执行失败'}` : step.tool;
+    const title = `${icon} ${label}` + (preview ? `  ${preview}` : '');
     const body = [];
     if (capture.tools && step.input) {
         body.push(step.tool === 'Shell'
@@ -520,12 +512,13 @@ function buildToolPanel(step, capture) {
     if (capture.results && step.result) {
         const result = String(step.result).trim();
         const clipped = result.length > TEXT_CHUNK ? result.slice(0, TEXT_CHUNK) + '\n…（已截断）' : result;
-        body.push({ tag: 'markdown', content: '**结果**\n```\n' + clipped + '\n```' });
+        const heading = step.failed ? '**报错**' : '**结果**';
+        body.push({ tag: 'markdown', content: heading + '\n```\n' + clipped + '\n```' });
     }
     if (!body.length) body.push({ tag: 'markdown', content: '_（无更多详情）_' });
     return {
         tag: 'collapsible_panel',
-        expanded: false,
+        expanded: !!step.failed,
         header: { title: { tag: 'plain_text', content: title } },
         elements: body,
     };
@@ -538,6 +531,7 @@ function buildToolPanel(step, capture) {
 function buildLiveCard({ segments, capture, model, projectName }) {
     const elements = [];
     let steps = 0;
+    let failed = 0;
 
     segments.forEach((seg, idx) => {
         if (idx > 0) elements.push({ tag: 'hr' });
@@ -552,15 +546,20 @@ function buildLiveCard({ segments, capture, model, projectName }) {
         (seg.tools || []).forEach((step) => {
             elements.push(buildToolPanel(step, capture));
             steps++;
+            if (step.failed) failed++;
         });
     });
 
     elements.push(cursorFooter({ model, projectName }));
 
+    // 失败在 header 上留个红标签：折叠面板再怎么展开，也得先让人知道这轮有东西挂了
+    const tags = [{ text: `${steps} 步`, color: 'indigo' }];
+    if (failed) tags.push({ text: `${failed} 步失败`, color: 'red' });
+
     return card2({
         template: 'indigo',
         title: '执行摘要',
-        tags: [{ text: `${steps} 步`, color: 'indigo' }],
+        tags,
         elements,
     });
 }
@@ -569,7 +568,6 @@ module.exports = {
     humanWindow,
     buildApprovalCard,
     buildFollowupCard,
-    buildFailureCard,
     buildAskCard,
     buildSettledAskCard,
     askResponses,

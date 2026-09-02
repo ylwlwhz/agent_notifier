@@ -121,14 +121,43 @@ test('续写回调映射：结束本轮 = 空裁决（不给 followup_message）
     assert.deepEqual(cards.followupResponses().stop_now.decision, {});
 });
 
-test('失败卡是红色且带失败原因', () => {
+test('失败的工具并进摘要卡：❌ + 原因 + 默认展开，header 上有红标签', () => {
     const event = translateCursorHook(failureFixture);
-    const card = cards.buildFailureCard({ event });
+    const failedStep = {
+        tool: event.meta.toolName,
+        icon: event.meta.icon,
+        input: event.meta.inputSummary,
+        result: event.meta.output,
+        failed: true,
+        failureReason: event.meta.failureReason,
+    };
+    const capture = { tools: true, output: true, results: true };
 
-    assert.equal(card.header.template, 'red');
-    const body = collect(card.body.elements, 'markdown').map((e) => e.content).join('\n');
-    assert.match(body, /执行超时/);
-    assert.match(body, /Command timed out after 30s/);
+    const panel = cards.buildToolPanel(failedStep, capture);
+    assert.match(panel.header.title.content, /❌ Shell — 执行超时/);
+    assert.equal(panel.expanded, true, '失败那一步没有独立卡片了，得默认展开才看得见');
+    const panelBody = collect(panel.elements, 'markdown').map((e) => e.content).join('\n');
+    assert.match(panelBody, /报错/);
+    assert.match(panelBody, /Command timed out after 30s/);
+
+    const card = cards.buildLiveCard({
+        segments: [{ text: '', tools: [failedStep, { tool: 'Read', icon: '📖', input: 'src/a.js', result: 'ok' }] }],
+        capture,
+        model: 'claude-opus-5',
+        projectName: 'agent_notifier',
+    });
+    const tags = card.header.text_tag_list.map((t) => t.text.content);
+    assert.deepEqual(tags, ['2 步', '1 步失败']);
+});
+
+test('全成功的摘要卡不挂失败标签', () => {
+    const card = cards.buildLiveCard({
+        segments: [{ text: '', tools: [{ tool: 'Read', icon: '📖', input: 'src/a.js', result: 'ok' }] }],
+        capture: { tools: true, output: true, results: true },
+        model: '',
+        projectName: '',
+    });
+    assert.deepEqual(card.header.text_tag_list.map((t) => t.text.content), ['1 步']);
 });
 
 test('完成卡收敛后保留助手正文，且不因为回话就刷成灰卡', () => {

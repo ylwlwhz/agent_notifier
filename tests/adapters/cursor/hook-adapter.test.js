@@ -83,17 +83,25 @@ test('postToolUse 翻译成实时摘要事件，tool_output 剥掉 JSON 外壳',
     assert.equal(event.meta.durationMs, 5432);
 });
 
-test('postToolUseFailure 翻译成失败事件并区分中断', () => {
+test('postToolUseFailure 也走实时摘要，只是标成失败（不再有独立的失败卡）', () => {
     const event = translateCursorHook(failureFixture);
 
-    assert.equal(event.kind, 'failure');
+    assert.equal(event.kind, 'live');
+    assert.equal(event.eventType, 'live_status');
+    assert.equal(event.meta.failed, true);
     assert.equal(event.meta.failureType, 'timeout');
+    assert.equal(event.meta.failureReason, '执行超时');
     assert.equal(event.meta.isInterrupt, false);
-    assert.match(event.message, /执行超时/);
-    assert.match(event.message, /Command timed out after 30s/);
+    assert.equal(event.meta.inputSummary, 'npm run e2e');
+    // 失败 payload 没有 tool_output，摘要里那一步的「结果」只能是 error_message
+    assert.equal(event.meta.output, 'Command timed out after 30s');
 
     const interrupted = translateCursorHook({ ...failureFixture, is_interrupt: true });
     assert.equal(interrupted.meta.isInterrupt, true);
+});
+
+test('postToolUse 不带失败标记，免得成功的步骤被渲染成 ❌', () => {
+    assert.equal(translateCursorHook(liveFixture).meta.failed, false);
 });
 
 test('afterAgentResponse 翻译成助手正文事件', () => {

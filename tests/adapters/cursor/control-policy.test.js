@@ -34,7 +34,6 @@ test('默认配置：通知开、控制关（阻塞类必须显式打开）', ()
 
     assert.equal(config.enabled, true);
     assert.equal(config.notifyStop, true);
-    assert.equal(config.notifyFailure, true);
     assert.equal(config.approval.enabled, false);
     assert.equal(config.followup.enabled, false);
     assert.equal(config.approval.timeoutMs, 180000);

@@ -41,6 +41,16 @@ test('buildSegments：一段文字带起其后的工具', () => {
     assert.deepEqual(segments[1].tools.map((t) => t.tool), ['StrReplace']);
 });
 
+test('buildSegments 透传失败标记：失败没有独立卡片了，标记丢了就等于失败被吞掉', () => {
+    const segments = live.buildSegments([
+        { type: 'tool', tool: 'Shell', icon: '⚡', input: 'npm run e2e', result: '超时', failed: true, failureReason: '执行超时' },
+        { type: 'tool', tool: 'Read', icon: '📖', input: 'src/a.ts', result: 'ok' },
+    ]);
+
+    assert.deepEqual(segments[0].tools.map((t) => t.failed), [true, false]);
+    assert.equal(segments[0].tools[0].failureReason, '执行超时');
+});
+
 test('buildSegments：开头就是工具时补一个无文字段，不丢步骤', () => {
     const segments = live.buildSegments([
         { type: 'tool', tool: 'Shell', icon: '⚡', input: 'ls' },

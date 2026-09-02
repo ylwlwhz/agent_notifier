@@ -427,7 +427,7 @@ nc/ncat/socat/corkscrew 全缺）打隧道。这个脚本原先只在 `tencent` 
 两条对策，都别退回去：
 
 - `feishu-client.js` 里 Lark SDK 是**惰性 require** 的，走 shim 的机器不为用不到的 SDK 付钱
-- 纯通知卡（完成卡 / 失败卡）走 `sendCardDetached()` → `cursor-send-card.js` 子进程，
+- 纯通知卡（完成卡）走 `sendCardDetached()` → `cursor-send-card.js` 子进程，
   hook 立刻返回。**需要事后收敛卡片的链路（审批 / 等续写）不能这么做**，它们要 message_id。
 
 改完后：只刷心跳的事件 ~1.9s，发完成卡 ~1.8s。发卡失败会记到
@@ -512,6 +512,10 @@ nc/ncat/socat/corkscrew 全缺）打隧道。这个脚本原先只在 `tencent` 
 
 - **实时摘要卡刻意不带输入框**：Cursor 运行中没有可回流的输入通道（唯一入口是 `stop` 的
   `followup_message`），摆一个点了没反应的输入框只会骗人。
+- **工具失败没有独立卡片**：`postToolUseFailure` 与 `postToolUse` 同归 `kind=live`，失败只是
+  摘要卡里的一步（❌ + 失败原因 + 默认展开，error_message 占「结果」的位置，卡头挂红色失败
+  计数）。每个失败工具发一张红卡太吵；但也别反过来把这个事件丢掉——那样失败的步骤会从摘要里
+  凭空消失，读摘要的人只看到成功的部分。用户主动中断（`is_interrupt`）不算失败，不进摘要。
 - 完成卡分两态：`waiting=true`（有 hook 正阻塞等你）才挂输入框与「结束本轮」按钮；
   `waiting=false` 是纯通知卡，不放任何交互组件。
 - 审批卡必须把「等多久、超时后会怎样」写在卡面上。
@@ -622,7 +626,7 @@ tests/
 │   ├── codex-live.test.js             # Codex 实时摘要卡片
 │   ├── codex-session-watcher.test.js  # Codex session 文件监控
 │   ├── codex-watcher.test.js          # Codex PTY 输出监控与交互卡
-│   ├── cursor-cards.test.js           # Cursor 审批/完成/失败/实时摘要/收敛卡
+│   ├── cursor-cards.test.js           # Cursor 审批/完成/实时摘要/收敛卡
 │   ├── cursor-live.test.js            # Cursor 实时摘要聚合与轮次边界
 │   └── feishu-listener.test.js               # 飞书监听器与交互回流
 ├── channels/
