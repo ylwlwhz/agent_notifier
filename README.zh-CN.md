@@ -229,7 +229,7 @@ codex
 ```
 
 Cursor 不需要包装函数，也不需要重开终端 —— hooks 装好后直接用 Cursor 即可，
-任务完成 / 工具失败 / 实时摘要的卡片会自动推到飞书。
+任务完成 / 实时摘要的卡片会自动推到飞书（失败的工具是摘要卡里的一步，不再单独发卡）。
 
 ### 6.（可选）打开 Cursor 远程控制
 
@@ -346,13 +346,16 @@ SOUND_ENABLED=true
 三个宿主共用这一套语义。Codex 的输出来自 `~/.codex/sessions/*.jsonl`，Cursor 的直接来自
 hook payload（`postToolUse` 自带 `tool_input` / `tool_output`），都不靠终端文本猜测。
 
+失败的工具（`postToolUseFailure`）就是这张摘要卡里的一步：标 `❌`、默认展开、把 error_message
+放在「结果」的位置，卡片头上再挂一个红色的失败计数。**没有独立的失败卡**——每个失败工具发一张
+红卡太吵，而直接丢掉这个事件又会让失败的步骤从摘要里凭空消失。
+
 ### Cursor 专属配置
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
 | `CURSOR_NOTIFY_ENABLED` | `1` | 总开关，关掉则 Cursor 相关卡片全不发 |
 | `CURSOR_NOTIFY_STOP` | `1` | 任务结束发完成卡 |
-| `CURSOR_NOTIFY_FAILURE` | `1` | 工具失败发失败卡（用户主动中断不算失败） |
 | `CURSOR_REMOTE_APPROVAL` | `0` | **远程审批**：飞书上批准 / 拒绝 Shell 与 MCP 调用 |
 | `CURSOR_APPROVAL_TIMEOUT_SEC` | `180` | 审批等待上限，超时回落到 Cursor 本地弹窗 |
 | `CURSOR_APPROVAL_MATCHER` | 空 | JS 正则，只对匹配的命令要审批（空=全部都问，很吵） |

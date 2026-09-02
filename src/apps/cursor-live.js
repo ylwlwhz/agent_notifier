@@ -68,6 +68,8 @@ function buildSegments(entries) {
             icon: entry.icon || '🔧',
             input: entry.input || '',
             result: entry.result || '',
+            failed: !!entry.failed,
+            failureReason: entry.failureReason || '',
         });
     }
     return segments;

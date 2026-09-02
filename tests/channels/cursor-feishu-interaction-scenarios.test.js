@@ -481,6 +481,68 @@ test('实时摘要全关时照样补打引导：这是两件不相干的事', (t
     assert.equal(fs.existsSync(cursorHook.liveBufferPath(event.sessionKey)), false);
 });
 
+// ── postToolUseFailure：失败并进摘要卡，不再单独发红卡 ────────────────────────
+
+/** 落盘但不真的 flush：flush 子进程会去发飞书卡片，测试里不能让它跑起来 */
+function captureLiveEntries(t, event, config) {
+    const cp = require('child_process');
+    const origSpawn = cp.spawn;
+    cp.spawn = () => ({ unref() {} });
+    const buffer = cursorHook.liveBufferPath(event.sessionKey);
+    t.after(() => {
+        cp.spawn = origSpawn;
+        try { fs.unlinkSync(buffer); } catch { /* 本来就没写成 */ }
+    });
+
+    cursorHook.handleLive(event, config);
+    if (!fs.existsSync(buffer)) return [];
+    return fs.readFileSync(buffer, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+
+function failureEvent(conversationId, extra = {}) {
+    return translateCursorHook({
+        hook_event_name: 'postToolUseFailure',
+        conversation_id: conversationId,
+        tool_name: 'Shell',
+        tool_input: { command: 'npm run e2e' },
+        error_message: 'Command timed out after 30s',
+        failure_type: 'timeout',
+        ...extra,
+    });
+}
+
+test('失败的工具作为一步写进本轮摘要缓冲，带上失败标记与原因', (t) => {
+    const event = failureEvent('conv-fail-000001');
+    const entries = captureLiveEntries(t, event, {
+        liveCapture: { tools: true, results: true },
+    });
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].type, 'tool');
+    assert.equal(entries[0].failed, true);
+    assert.equal(entries[0].failureReason, '执行超时');
+    assert.equal(entries[0].result, 'Command timed out after 30s');
+});
+
+test('用户主动中断不算故障：不进摘要，免得挂个冤枉的 ❌', (t) => {
+    const event = failureEvent('conv-fail-000002', { is_interrupt: true });
+    assert.deepEqual(captureLiveEntries(t, event, { liveCapture: { tools: true, results: true } }), []);
+});
+
+test('成功的工具不带失败标记', (t) => {
+    const event = translateCursorHook({
+        hook_event_name: 'postToolUse',
+        conversation_id: 'conv-fail-000003',
+        tool_name: 'Shell',
+        tool_input: { command: 'ls' },
+        tool_output: '"a.js"',
+    });
+    const entries = captureLiveEntries(t, event, { liveCapture: { tools: true, results: true } });
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].failed, undefined);
+});
+
 // ── 心跳：只在「说完话」之后武装看门狗 ────────────────────────────────────────
 
 test('trackActivity：每个事件都刷心跳并保证有看门狗，stop 则清掉心跳', () => {

@@ -55,8 +55,9 @@ async function sendPlainCard(app, card) {
     });
 }
 
-/** 只读通知卡：失败卡 + 实时摘要卡 + 纯通知完成卡，看渲染即可，不需要点 */
+/** 只读通知卡：实时摘要卡 + 纯通知完成卡，看渲染即可，不需要点 */
 async function verifyNotifyCards(app) {
+    const live = makeEvent({ hook_event_name: 'postToolUse', tool_name: 'Shell', tool_input: { command: 'npm test' } });
     const failure = makeEvent({
         hook_event_name: 'postToolUseFailure',
         tool_name: 'Shell',
@@ -64,23 +65,28 @@ async function verifyNotifyCards(app) {
         error_message: 'Command timed out after 30s',
         failure_type: 'timeout',
     });
-    await sendPlainCard(app, cards.buildFailureCard({ event: failure }));
-    console.log('  ✔ 失败卡（红）已发送');
-
-    const live = makeEvent({ hook_event_name: 'postToolUse', tool_name: 'Shell', tool_input: { command: 'npm test' } });
     await sendPlainCard(app, cards.buildLiveCard({
         segments: [{
             text: '先跑一遍测试，然后改一处实现。',
             tools: [
                 { tool: 'Shell', icon: '⚡', input: 'npm test -- --reporter=dot', result: '208 passing' },
                 { tool: 'StrReplace', icon: '✏️', input: 'src/apps/cursor-hook.js', result: '' },
+                // 失败没有独立卡片了，它就是这张摘要里的一步（❌ + 默认展开 + header 红标签）
+                {
+                    tool: failure.meta.toolName,
+                    icon: failure.meta.icon,
+                    input: failure.meta.inputSummary,
+                    result: failure.meta.output,
+                    failed: true,
+                    failureReason: failure.meta.failureReason,
+                },
             ],
         }],
         capture: { tools: true, output: true, results: true },
         model: live.meta.model,
         projectName,
     }));
-    console.log('  ✔ 实时摘要卡（靛蓝、工具默认折叠、无输入框）已发送');
+    console.log('  ✔ 实时摘要卡（靛蓝、成功的步骤默认折叠、失败那步 ❌ 默认展开、无输入框）已发送');
 
     const stop = makeEvent({ hook_event_name: 'stop', status: 'completed' });
     await sendPlainCard(app, cards.buildFollowupCard({

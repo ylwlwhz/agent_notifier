@@ -14,8 +14,7 @@
  *   approval  阻塞审批（beforeShellExecution / beforeMCPExecution / preToolUse）
  *   followup  阻塞续写（stop / subagentStop，回 followup_message 可让 Cursor 自动继续）
  *   response  助手正文（afterAgentResponse），供完成卡正文与实时摘要使用
- *   live      工具执行流水（postToolUse）
- *   failure   工具失败（postToolUseFailure）
+ *   live      工具执行流水（postToolUse / postToolUseFailure，失败只是流水里的一步）
  *   ignore    本仓库暂不处理
  */
 
@@ -31,7 +30,7 @@ const EVENT_KINDS = Object.freeze({
     subagentStop: 'followup',
     afterAgentResponse: 'response',
     postToolUse: 'live',
-    postToolUseFailure: 'failure',
+    postToolUseFailure: 'live',
 });
 
 const EVENT_TYPE_BY_KIND = Object.freeze({
@@ -40,7 +39,6 @@ const EVENT_TYPE_BY_KIND = Object.freeze({
     followup: EVENT_TYPES.TASK_RESULT,
     response: EVENT_TYPES.MESSAGE,
     live: EVENT_TYPES.LIVE_STATUS,
-    failure: EVENT_TYPES.TASK_RESULT,
     ignore: EVENT_TYPES.MESSAGE,
 });
 
@@ -165,17 +163,6 @@ function describeApproval(payload = {}) {
     return lines.join('\n');
 }
 
-function describeFailure(payload = {}) {
-    const tool = payload.tool_name || '未知工具';
-    const icon = TOOL_ICONS[tool] || '🔧';
-    const reason = FAILURE_TYPE_TEXT[payload.failure_type] || '执行失败';
-    const lines = [`${icon} **${tool}** — ${reason}`];
-    const summary = summarizeToolInput(tool, payload.tool_input);
-    if (summary) lines.push('```\n' + truncate(summary, 800) + '\n```');
-    if (payload.error_message) lines.push('```\n' + truncate(payload.error_message, 1500) + '\n```');
-    return lines.join('\n');
-}
-
 /**
  * 统一翻译入口。返回的对象既含仓库统一事件字段（host/sessionId/eventType），
  * 也含 cursor-hook 决策所需的 kind/meta。
@@ -232,20 +219,24 @@ function translateCursorHook(payload = {}) {
         message = String(payload.text || '').trim();
         title = 'Cursor 回复';
     } else if (kind === 'live') {
+        // 失败的工具走同一条流水：它是本轮真实发生过的一步，只是结果是报错而不是输出
+        meta.failed = eventName === 'postToolUseFailure';
         meta.toolName = payload.tool_name || '';
         meta.icon = TOOL_ICONS[meta.toolName] || '🔧';
         meta.toolInput = payload.tool_input || null;
         meta.inputSummary = summarizeToolInput(meta.toolName, payload.tool_input);
-        meta.output = extractToolOutput(payload.tool_output);
         meta.durationMs = Number(payload.duration || 0) || null;
+        if (meta.failed) {
+            // 失败 payload 没有 tool_output，error_message 就是它的「结果」
+            meta.output = String(payload.error_message || '');
+            meta.failureType = payload.failure_type || 'error';
+            meta.failureReason = FAILURE_TYPE_TEXT[meta.failureType] || '执行失败';
+            meta.isInterrupt = !!payload.is_interrupt;
+        } else {
+            meta.output = extractToolOutput(payload.tool_output);
+        }
         title = '执行摘要';
         message = meta.inputSummary;
-    } else if (kind === 'failure') {
-        meta.toolName = payload.tool_name || '';
-        meta.failureType = payload.failure_type || 'error';
-        meta.isInterrupt = !!payload.is_interrupt;
-        title = '工具执行失败';
-        message = describeFailure(payload);
     }
 
     return {
@@ -264,7 +255,6 @@ function translateCursorHook(payload = {}) {
 module.exports = {
     translateCursorHook,
     describeApproval,
-    describeFailure,
     extractToolOutput,
     summarizeToolInput,
     resolveProjectName,

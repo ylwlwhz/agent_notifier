@@ -72,7 +72,6 @@ test('Cursor 的发卡入口一律走工厂，不得直接 new Lark.Client', () 
 
 const cursorHook = require('../../src/apps/cursor-hook');
 const { sendCardFile } = require('../../src/apps/cursor-send-card');
-const { translateCursorHook } = require('../../src/adapters/cursor/hook-adapter');
 
 function withoutCreds(fn) {
     const saved = { id: process.env.FEISHU_APP_ID, secret: process.env.FEISHU_APP_SECRET };
@@ -88,28 +87,6 @@ test('没配凭据时 sendCardDetached 直接返回 false，不 spawn 任何东�
     withoutCreds(() => {
         assert.equal(cursorHook.sendCardDetached({ body: { elements: [] } }), false);
     });
-});
-
-test('失败卡不阻塞 hook：handleFailure 同步返回空裁决', () => {
-    const event = translateCursorHook({
-        hook_event_name: 'postToolUseFailure',
-        conversation_id: 'c-fail',
-        tool_name: 'Shell',
-        failure_type: 'timeout',
-    });
-    withoutCreds(() => {
-        // 关键是它不再 await 一次飞书往返 —— 返回值必须是普通对象而不是 Promise
-        const out = cursorHook.handleFailure(event, { notifyFailure: true });
-        assert.deepEqual(out, {});
-        assert.equal(out instanceof Promise, false);
-    });
-});
-
-test('中断不算故障，不发卡', () => {
-    const event = translateCursorHook({
-        hook_event_name: 'postToolUseFailure', conversation_id: 'c2', is_interrupt: true,
-    });
-    assert.deepEqual(cursorHook.handleFailure(event, { notifyFailure: true }), {});
 });
 
 test('子进程侧：文件缺失或没凭据都安静失败并留痕，不抛异常', async () => {

@@ -11,8 +11,7 @@
  *   preToolUse                                 同上（需 CURSOR_APPROVE_TOOLS 显式列名）
  *   stop / subagentStop                        完成卡 + 阻塞续写 → 回 followup_message
  *   afterAgentResponse                         助手正文，喂完成卡与实时摘要
- *   postToolUse                                实时执行摘要 + 会话中途补打提问引导
- *   postToolUseFailure                         失败卡
+ *   postToolUse / postToolUseFailure           实时执行摘要 + 会话中途补打提问引导
  *
  * 超时一律回落到宿主本地行为，绝不把 Cursor 永久挂住（见 control-policy）。
  */
@@ -420,14 +419,6 @@ async function handleFollowup(event, config) {
     return decision || {};
 }
 
-function handleFailure(event, config) {
-    // 用户主动中断不是故障，不该弹卡
-    if (!config.notifyFailure || event.meta.isInterrupt) return {};
-    // 失败卡也是纯通知，同样不该让 Cursor 等发卡（postToolUseFailure 之后还有活儿要干）
-    sendCardDetached(cards.buildFailureCard({ event }));
-    return {};
-}
-
 /** 实时摘要条目的公共字段。generationId 是轮次边界，cursor-live 靠它决定 patch 还是新发 */
 function liveEnvelope(event) {
     return {
@@ -452,7 +443,9 @@ function handleLive(event, config) {
     const reminder = steerReminder(event, config);
 
     const capture = config.liveCapture;
-    if (capture && (capture.tools || capture.results)) {
+    // 用户主动中断不是故障，别在摘要里给它挂个 ❌
+    const interrupted = event.meta.failed && event.meta.isInterrupt;
+    if (!interrupted && capture && (capture.tools || capture.results)) {
         appendLive(event.sessionKey, {
             type: 'tool',
             tool: event.meta.toolName,
@@ -460,6 +453,8 @@ function handleLive(event, config) {
             input: event.meta.inputSummary,
             result: capture.results ? event.meta.output : '',
             durationMs: event.meta.durationMs,
+            // 失败不再单独发一张红卡，而是并进本轮同一张摘要卡里的一步
+            ...(event.meta.failed ? { failed: true, failureReason: event.meta.failureReason } : {}),
             ...liveEnvelope(event),
         });
     }
@@ -473,7 +468,6 @@ const HANDLERS = {
     session: handleSessionStart,
     approval: handleApproval,
     followup: handleFollowup,
-    failure: handleFailure,
     response: handleResponse,
     live: handleLive,
 };
@@ -548,7 +542,6 @@ module.exports = {
     handleSessionStart,
     handleApproval,
     handleFollowup,
-    handleFailure,
     handleResponse,
     handleLive,
     steerReminder,
