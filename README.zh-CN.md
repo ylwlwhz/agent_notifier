@@ -445,7 +445,7 @@ claude
 | 组件 | 角色 | 安装方式 |
 |------|------|---------|
 | **agent-notifier** | 飞书交互卡通知 + 远程输入回注（本仓库） | `install.sh` 全自动 |
-| **statusLine** | 状态栏按限额窗口显示消耗与上下文 + `cost-capture.js` 抓官方数据供完成卡显示 | `install.sh` 自动接入跨平台 `scripts/statusline.sh` |
+| **statusLine** | 状态栏显示模型/思考强度/各限额窗口的消耗与额度/上下文 + `cost-capture.js` 抓官方数据供完成卡显示 | `install.sh` 自动接入跨平台 `scripts/statusline.sh` |
 | **claude-remote-shell** | 把 Claude 的 Bash 工具命令 ssh 到远程机执行（可选） | `install.sh` 拉取脚本；mutagen 需另装 |
 
 三者**互不冲突、按层分离**：claude-remote-shell 只重定向 Bash 工具命令，TUI / hooks / statusLine 全在本机运行，agent-notifier 的发卡与回注照常工作。

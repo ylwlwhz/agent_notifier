@@ -797,11 +797,26 @@ Cursor + 飞书联调只需要：
 
 ### 11.7 statusLine 的消耗统计（`src/lib/usage-window.js`）
 
-状态栏三行：`user@host:cwd` / `模型 · 限额窗口内的消耗($) · 上下文占用` / 套餐限额（%）。
-第二、三行的**限额标签相同、窗口相同**，上下对着看就是「这段时间花了多少钱 / 用掉多少额度」。
-第二行的模型（`.model.display_name`，Claude 自己已把型号 id 映射成「Opus 5」这种短标签）与
-上下文（`.context_window.used_percentage`）都是 payload 里现成的字段，不扫任何文件，白拿；
-只有中间的消耗需要算。三段各自缺失时只是少一段，不会把整行带没。
+状态栏两行：`user@host:cwd` / `模型 · 思考强度 · <每档限额：消耗 $x  已用 y%  ⟳倒计时> · 上下文`，
+例如 `Opus 5 · high · 5h $19.63 31% ⟳54m · 周 $224.10 15% ⟳11h56m · 🧠 11%`（实测 68 显示列）。
+
+- **消耗与限额合成一段写**，因为它们说的是同一个窗口（消耗的窗口起点就是从 `resets_at` 反推的）。
+  分成两行要人来回对，合起来一眼就是「这 5 小时花了 $19.63、用掉 31%、54 分钟后清零」。
+- **除消耗外全是 payload 现成字段，白拿**：模型 `.model.display_name`（Claude 自己已把型号 id
+  映射成「Opus 5」这种短标签，见 binary 里的 `us(modelId)`）、思考强度 `.effort.level`、
+  上下文 `.context_window.used_percentage`。只有中间的消耗需要算。
+- **`.effort` 与 `.thinking.enabled` 是两个互不约束的字段**：前者只在「当前模型支持 reasoning
+  effort」时才出现（binary 里 `...hh(nt)&&{effort:{level:Lw(nt,$e)}}`），关掉扩展思考时 effort
+  仍可能留着旧值。所以 `thinking.enabled === false` 时直接标「思考关」，不报一个会误导的强度。
+- **档位不写死**，按 `.rate_limits` 与消耗的**并集**遍历，顺序在 jq 里定死（先 rate_limits 的
+  原始顺序，再补只有消耗的档位）。Claude 2.1.223 的 payload 只塞 `five_hour` / `seven_day`
+  （Fable / Opus / Sonnet 那几档周额度它自己从响应头读得到却没写进来），哪天补上不改脚本就多一段。
+- ⚠️ **jq 输出用 `\x1f` 分隔，不要用 `@tsv`**：制表符属于 IFS 空白字符，bash 会把连续空白分隔符
+  合并成一个，「有消耗但没限额」这种空字段会被吃掉，后面的列整体前移，`epoch_to_left` 收到小数
+  直接报 `invalid arithmetic operator`。非空白分隔符才保留空字段。
+- 每一段各自缺失时只是少一段，不会把整行带没；第二行整体为空时不留空行。
+- 限额曾因为「挂在行尾被整段切掉」而单独占过一行——那时第二行是 ccusage 的六段输出，实测
+  **143 显示列**。现在整行只有 68 列，合回来是安全的；**再往这行加东西之前先量一遍显示宽度**。
 
 - **不用 ccusage**。它只会按【自己划的 5 小时块】和自然日/自然周聚合，块起点是「首条消息
   所在整点」，跟 Claude 的额度重置点没有关系——限额行写着「⟳2h11m 后重置」，消耗行却在报
