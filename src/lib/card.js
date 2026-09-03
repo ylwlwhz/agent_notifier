@@ -22,13 +22,34 @@ function card2({ template, icon, title, subtitle, tags = [], elements }) {
     return { schema: '2.0', config: { wide_screen_mode: true }, header, body: { elements: elements.filter(Boolean) } };
 }
 
-/** stats（成本/上下文/时长，均来自 statusLine 官方字段）→ header 彩色标签 */
-function statsTags(stats, tagColor = 'grey') {
+// 限额档位 → 标签名。与 scripts/statusline.sh 的 limit_label 保持同一套叫法，
+// 手机上看卡片和电脑上看状态栏说的是同一个东西。未知档位原样显示。
+const LIMIT_LABEL = {
+    five_hour: '5h',
+    seven_day: '周',
+    seven_day_overage_included: 'Fable',
+    seven_day_opus: 'Opus',
+    seven_day_sonnet: 'Sonnet',
+    overage: '额度',
+};
+
+/** 快用完时才需要显眼：≥90 红、≥70 橙，其余灰——这是每张卡片都常驻的标签，平时别抢眼 */
+function limitTagColor(pct) {
+    return pct >= 90 ? 'red' : pct >= 70 ? 'orange' : 'grey';
+}
+
+/** stats（套餐限额 / 上下文，均来自 statusLine 官方字段）→ header 彩色标签 */
+function statsTags(stats) {
     if (!stats) return [];
     const tags = [];
-    if (stats.costUSD > 0) tags.push({ text: `$${stats.costUSD.toFixed(2)}`, color: 'grey' });
+    // 本次会话花了多少钱、跑了多久，看到卡片时都已成定局，改变不了下一步动作；
+    // 「5h 已用 82%」才会——所以这里放限额，不放 session 成本与总时长。
+    for (const [key, v] of Object.entries(stats.rateLimits || {})) {
+        if (!v || v.used_percentage == null) continue;
+        const pct = Math.round(v.used_percentage);
+        tags.push({ text: `${LIMIT_LABEL[key] || key} ${pct}%`, color: limitTagColor(pct) });
+    }
     if (stats.contextPct != null) tags.push({ text: `🧠 ${stats.contextPct}%`, color: 'grey' });
-    if (stats.duration) tags.push({ text: `⏱ ${stats.duration}`, color: tagColor });
     return tags;
 }
 

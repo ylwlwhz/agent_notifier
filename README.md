@@ -303,7 +303,7 @@ claude
 | Component | Role | Install |
 |-----------|------|---------|
 | **agent-notifier** | Feishu interactive cards + remote input injection (this repo) | `install.sh`, fully automatic |
-| **ccusage statusline** | Status-bar cost/duration + `cost-capture.js` feeding official metrics to completion cards | `install.sh` wires up cross-platform `scripts/statusline.sh` |
+| **statusLine** | Status-bar spend per rate-limit window + `cost-capture.js` feeding official metrics to completion cards | `install.sh` wires up cross-platform `scripts/statusline.sh` |
 | **claude-remote-shell** | Redirects Claude's Bash tool commands to a remote host over SSH (optional) | `install.sh` fetches the script; mutagen installed separately |
 
 They are layer-separated and do not conflict: claude-remote-shell only redirects Bash tool commands, while TUI / hooks / statusLine all run locally.
@@ -314,8 +314,7 @@ They are layer-separated and do not conflict: claude-remote-shell only redirects
 |------------|----------|---------|------------------------|
 | node ≥18, npm | yes | runtime | `apt install nodejs npm` / `brew install node` |
 | python3 | yes | pty-relay | built-in / `brew install python3` |
-| jq | enhanced | statusLine timestamp parsing | `apt install jq` / `brew install jq` |
-| bun or npx | enhanced | run ccusage | `curl -fsSL https://bun.sh/install \| bash` |
+| jq | enhanced | statusLine payload parsing | `apt install jq` / `brew install jq` |
 | mutagen | enhanced | claude-remote-shell sync | [releases](https://github.com/mutagen-io/mutagen/releases) / `brew install mutagen-io/mutagen/mutagen` |
 
 > Missing enhanced dependencies only trigger a warning with the install command — they do not abort installation.

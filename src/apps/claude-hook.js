@@ -22,48 +22,17 @@ const { isRelayMode, enqueueRequest, containerId } = require('../lib/relay');
 
 // ── 会话统计 ─────────────────────────────────────────────
 
-/** 时长 ms → 紧凑串（不到 1 分钟才显示秒，否则秒无意义） */
-function fmtDuration(ms) {
-    const total = Math.floor(ms / 1000);
-    const h = Math.floor(total / 3600), m = Math.floor((total % 3600) / 60), s = total % 60;
-    return h > 0 ? `${h}h${m}m` : m > 0 ? `${m}m` : `${s}s`;
-}
-
-/** 读 cost-capture.js 落盘的官方成本/时长；文件按完整 session_id 命名，多窗口互不干扰，无则 null */
+/** 读 cost-capture.js 落盘的官方字段；文件按完整 session_id 命名，多窗口互不干扰，无则 null */
 function readOfficialStats(sessionId) {
     if (!sessionId) return null;
     try {
         const j = JSON.parse(fs.readFileSync(`/tmp/claude-cost-${sessionId}.json`, 'utf8'));
         return {
-            costUSD: typeof j.cost === 'number' ? j.cost : null,
-            duration: typeof j.durationMs === 'number' ? fmtDuration(j.durationMs) : '',
             contextPct: j.contextPct,
             sessionName: j.sessionName,
+            rateLimits: j.rateLimits,   // hook 的 payload 不带 rate_limits，只能从 statusLine 旁路拿
         };
     } catch { return null; }
-}
-
-function parseSessionStats(transcriptPath) {
-    if (!transcriptPath) return null;
-    try {
-        const raw = fs.readFileSync(transcriptPath, 'utf8').trim();
-        if (!raw) return null;
-
-        const timestamps = [];
-        for (const line of raw.split('\n')) {
-            let d;
-            try { d = JSON.parse(line); } catch { continue; }
-            if (d.timestamp) timestamps.push(d.timestamp);
-        }
-
-        const duration = timestamps.length >= 2
-            ? fmtDuration(new Date(timestamps[timestamps.length - 1]) - new Date(timestamps[0]))
-            : '';
-
-        return { duration };
-    } catch {
-        return null;
-    }
 }
 
 // ── 工具函数 ─────────────────────────────────────────────
@@ -139,7 +108,7 @@ function getProjectName(cwd) {
 
 // ── 卡片构建 ─────────────────────────────────────────────
 
-/** Stop / StopFailure 卡：会话名作副标题，时长/成本等官方字段作 header 标签，正文为 body；输入框与 footer 由发送侧补 */
+/** Stop / StopFailure 卡：会话名作副标题，套餐限额/上下文等官方字段作 header 标签，正文为 body；输入框与 footer 由发送侧补 */
 function buildCard(title, body, template, stats) {
     return card2({ template, title, subtitle: stats?.sessionName, tags: statsTags(stats), elements: parseMarkdownToElements(body) });
 }
@@ -454,11 +423,12 @@ async function main() {
     // In relay mode the host owns Feishu creds; the container need not have them.
     if (!isRelayMode() && !envConfig.getFeishuAppConfig().enabled) return;
 
-    // 懒求值：优先用 statusLine 旁路落盘的官方成本/时长（与状态栏同源），无则回退 transcript 时长
+    // 懒求值：卡片标签用 statusLine 旁路落盘的官方字段（与状态栏同源）；
+    // 本次会话还没渲染过状态栏时文件不存在，标签整组不出现，卡片正文不受影响。
     let statsVal, statsDone = false;
     const getStats = () => {
         if (!statsDone) {
-            statsVal = readOfficialStats(data.session_id) || parseSessionStats(data.transcript_path) || {};
+            statsVal = readOfficialStats(data.session_id) || {};
             statsDone = true;
         }
         return statsVal;

@@ -75,23 +75,14 @@ if [ "$missing" -eq 1 ]; then
 fi
 
 # ── 1.2 增强依赖检测（缺失只警告 + 给安装命令，不中断）──────
-# jq：statusLine 脚本需要；bun/npx：跑 ccusage 需要；mutagen：claude-remote-shell 需要
-info "正在检查增强依赖（statusLine / ccusage / claude-remote-shell）..."
+# jq：statusLine 脚本需要；mutagen：claude-remote-shell 需要
+# （消耗统计已改为内置实现，见 src/lib/usage-window.js，不再需要 bun/npx 跑 ccusage）
+info "正在检查增强依赖（statusLine / claude-remote-shell）..."
 
 if command -v jq &>/dev/null; then
     success "jq $(jq --version 2>&1)"
 else
-    warn "未找到 jq（statusLine 解析 payload 的 cwd / rate_limits 需要）。安装：$(detect_pkg_hint jq)"
-fi
-
-if command -v bun &>/dev/null; then
-    success "bun $(bun --version 2>&1)"
-elif command -v bunx &>/dev/null; then
-    success "bunx 可用"
-elif command -v npx &>/dev/null; then
-    success "npx 可用（将用 npx 运行 ccusage）"
-else
-    warn "未找到 bun/bunx/npx（statusLine 的 ccusage 需要其一）。建议安装 bun：curl -fsSL https://bun.sh/install | bash"
+    warn "未找到 jq（statusLine 解析 payload 的 cwd / 消耗 / rate_limits 需要）。安装：$(detect_pkg_hint jq)"
 fi
 
 if command -v mutagen &>/dev/null; then

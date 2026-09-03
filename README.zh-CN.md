@@ -205,7 +205,7 @@ bash install.sh
 - 从 `.env.example` 创建 `.env`（如不存在）
 - 写入 Claude Code hooks 到 `~/.claude/settings.json`
 - 写入 Cursor hooks 到 `~/.cursor/hooks.json`（只增删本项目的条目，你自己的 hook 会保留）
-- **配置 statusLine**（拷贝跨平台 `scripts/statusline.sh` 到 `~/.claude/`，接入 `cost-capture.js` 抓官方成本/时长/上下文）
+- **配置 statusLine**（拷贝跨平台 `scripts/statusline.sh` 到 `~/.claude/`，接入 `cost-capture.js` 算限额窗口内的消耗、抓官方上下文/限额）
 - 注入 `claude` / `codex` shell 包装函数（zsh 写 `~/.zshenv`；bash 写 login 文件 `~/.bash_profile`（无则 `~/.profile`）**和** `~/.bashrc` 各一份 — 仅写 `.bashrc` 不够，多数发行版默认 `.bashrc` 对非交互 shell 提前 return，故函数必须直接进 login 文件，保证 `claude-remote-shell` 的 `bash -l -c` 非交互 login 也能拉起 PTY 中继）
 - **安装 claude-remote-shell**（从官方仓库拉取脚本到 `~/.local/bin`；mutagen 需另装）
 - **自动启动飞书监听器并注册开机自启**
@@ -445,7 +445,7 @@ claude
 | 组件 | 角色 | 安装方式 |
 |------|------|---------|
 | **agent-notifier** | 飞书交互卡通知 + 远程输入回注（本仓库） | `install.sh` 全自动 |
-| **ccusage statusline** | 状态栏成本/时长 + `cost-capture.js` 抓官方数据供完成卡显示 | `install.sh` 自动接入跨平台 `scripts/statusline.sh` |
+| **statusLine** | 状态栏按限额窗口显示消耗 + `cost-capture.js` 抓官方数据供完成卡显示 | `install.sh` 自动接入跨平台 `scripts/statusline.sh` |
 | **claude-remote-shell** | 把 Claude 的 Bash 工具命令 ssh 到远程机执行（可选） | `install.sh` 拉取脚本；mutagen 需另装 |
 
 三者**互不冲突、按层分离**：claude-remote-shell 只重定向 Bash 工具命令，TUI / hooks / statusLine 全在本机运行，agent-notifier 的发卡与回注照常工作。
@@ -456,8 +456,7 @@ claude
 |------|------|------|---------------------|
 | node ≥18、npm | ✅ | 运行时 | `apt install nodejs npm` / `brew install node` |
 | python3 | ✅ | pty-relay PTY 中继 | 系统自带 / `brew install python3` |
-| jq | 增强 | statusLine 解析时间戳 | `apt install jq` / `brew install jq` |
-| bun 或 npx | 增强 | 运行 ccusage | `curl -fsSL https://bun.sh/install \| bash` |
+| jq | 增强 | statusLine 解析 payload | `apt install jq` / `brew install jq` |
 | mutagen | 增强 | claude-remote-shell 文件同步 | [releases](https://github.com/mutagen-io/mutagen/releases) / `brew install mutagen-io/mutagen/mutagen` |
 
 > 增强依赖缺失时 `install.sh` 只警告并打印安装命令，不中断安装。

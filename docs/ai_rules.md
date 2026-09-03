@@ -583,6 +583,17 @@ Codex 的实时摘要规则：
 - **一轮一张卡**：本轮所有「文字段 + 其工具」合并进**同一张**执行摘要卡（`buildSummaryCard`），不再每段一张。同轮内新增工具/段落 → patch 同一张卡；跨轮（`turnTs` 变）才新发。
 - **命令/结果点击查看**：每个工具是一张**默认折叠**的 `collapsible_panel`（`buildToolPanel`），标题只放「图标+工具+命令首行预览（截断单行）」，展开后才看完整命令（Bash 用代码块）+ 完整结果。弃用 `table`——飞书表格多行单元格会相互重叠。
 
+#### Claude 卡片 header 标签
+
+- 标签只放**套餐限额**（`5h 31%` / `周 44%`，≥90 红、≥70 橙、其余灰）与**上下文**（`🧠 9%`）。
+- **不放 session 成本与总时长**：看到卡片时这两个数都已成定局，改变不了下一步动作；
+  「5h 已用 82%」才会。要看历史花费有 `ccusage`，不必占卡片上仅有的几个标签位。
+- 数据只能从 statusLine 旁路来：hook 的 payload **不带** `rate_limits` 与 `cost`，
+  由 `src/apps/cost-capture.js` 落盘到 `/tmp/claude-cost-<session_id>.json`，
+  `readOfficialStats()` 再读回来（本次会话还没渲染过状态栏时文件不存在 → 标签整组不出现）。
+- 标签名与 `scripts/statusline.sh` 的 `limit_label` 保持同一套叫法（`5h` / `周` / `Opus`…），
+  手机上看卡片和电脑上看状态栏说的是同一个东西。
+
 #### 执行摘要并入「已收到」卡（仅 Claude）
 
 - listener 发「已收到」卡后，把 `message_id` 写入 `received_msg_<sessionKey>`（`sessionKey` = 通知 `session_id` 去 `claude_` 前缀再 `slice(0,8)`，对齐 `claude-live` 的键），带 `created_at` 与回执文案 `detail`（`_receivedDetail` 生成，与「已收到」卡共用）。
@@ -741,7 +752,8 @@ Cursor + 飞书联调只需要：
 
 ### 11.2 平台相关写法必须双分支，不写死单平台
 
-- 日期：GNU `date -u -d "...Z" +%s` vs BSD `date -j -u -f`（见 `scripts/statusline.sh`，用 `date --version` 探测）
+- 日期：GNU `date -u -d "...Z" +%s` vs BSD `date -j -u -f`，用 `date --version` 探测分支
+  （statusLine 早期靠它解析 transcript 时间戳，现已去掉该功能；规则本身仍然有效）
 - 逆序：`tac`（GNU）vs `tail -r`（BSD）
 - 终端解析：Linux `/proc/<pid>/fd/0` vs macOS `ps -o tt=`（见 `src/lib/terminal-inject.js`）
 - `sed -i`：GNU 用 `sed -i`，BSD/macOS 用 `sed -i ''`。统一封装 `sed_inplace`（见 `uninstall.sh`）
@@ -771,6 +783,7 @@ Cursor + 飞书联调只需要：
 ### 11.5 组件关系
 
 - `scripts/statusline.sh` 跨平台 statusLine，install.sh 拷到 `~/.claude/statusline.sh` 并接入 `cost-capture.js`
+  （三行：`user@host:cwd` / 限额窗口内的消耗 / 套餐限额，详见 11.7）
 - claude-remote-shell 只把 **Bash 工具命令** ssh 到远程执行；TUI / hooks / statusLine / 发卡 / 回注全在本机，
   与 agent-notifier 不冲突（详见 README「跨平台部署」）
 
@@ -781,3 +794,35 @@ Cursor + 飞书联调只需要：
 - 改 install.sh 后在干净环境验**幂等**（重跑先 uninstall 再装，不残留、不重复注入）。
 - 注入类改动要做**字节级验证**（pane 内 `timeout 3 cat | od -c` 看实收字节），不要只看"没报错"。
 
+
+### 11.7 statusLine 的消耗统计（`src/lib/usage-window.js`）
+
+状态栏三行：`user@host:cwd` / 限额窗口内的消耗（$） / 套餐限额（%）。第二、三行**标签相同、
+窗口相同**，上下对着看就是「这段时间花了多少钱 / 用掉多少额度」。
+
+- **不用 ccusage**。它只会按【自己划的 5 小时块】和自然日/自然周聚合，块起点是「首条消息
+  所在整点」，跟 Claude 的额度重置点没有关系——限额行写着「⟳2h11m 后重置」，消耗行却在报
+  另一个起点的 5 小时，两行对不上。顺带也甩掉了 npx 冷启动经代理拉包、慢渲染被 Claude 掐掉
+  导致状态栏长期冻住的老毛病（statusLine 现在只依赖 jq）。
+- **窗口起点由 `rate_limits.<档位>.resets_at` 反推**：`[resets_at - 窗口长度, resets_at]`。
+  `WINDOW_MS` 只认识 `five_hour` / `seven_day`（payload 不给窗口长度，只能写死）。
+  没有 `rate_limits`（API key 模式 / 本次会话还没发过请求）或 `resets_at` 已过期时，
+  退化成「截至此刻的滚动窗口」，不让整行消失。
+- **定价按模型系列前缀匹配**，每个系列只记一个 input 基准价，其余四档是锁死的固定比例：
+  `output = 5×`、`cache write 5m = 1.25×`、`cache write 1h = 2×`、`cache read = 0.1×`。
+  写死完整型号的表每出一个小版本就会漏一个，漏掉的会被整段算成 0 元——ccusage 20.0.20
+  至今把 `claude-fable-5-1` 算成 $0 就是这么来的。认不出的 `claude-*` 退到 Opus 档估算，
+  宁可高估也不要显示成 $0。
+- **去重键是 `message.id`，且后写的覆盖先写的**。Claude Code 会为同一条 assistant 消息的
+  每个 content block（思考 / 正文 / 每个 tool_use）各写一行，行与行共享 `message.id`，而
+  `usage.output_tokens` 是写这一行时的**累计快照**——只认第一行会把输出 token 少算几倍
+  （实测某天 109420 vs 350980）。取最后一行才等于这条消息的最终用量。
+  覆盖写也让「同一段内容重复扫一遍」成为幂等操作，尾部扩读因此不必去算重叠区间。
+- **只读 transcript 的尾部**。单份 transcript 能长到几十 MB（实测 58MB），7 天窗口往往只占
+  末尾一小段；JSONL 按时间递增追加，所以「本段最早一条已早于窗口起点」= 前面全都不用看。
+  再叠一层 `mtime < 窗口起点就整份跳过`。实测全量读 0.57s → 尾读 0.21s。
+- **结果带 8 秒缓存**（`/tmp/claude-usage-window.json`，按窗口起点作键，过了重置点自动作废）。
+  statusLine 的 `refreshInterval` 是 30s，但事件驱动的重绘密集得多，不缓存会白算很多遍。
+- **对账方式**：与 `ccusage daily --json -O` 逐日逐模型比。40 个「日 × 模型」里 31 个分毫不差，
+  其余差异都已定位且是 ccusage 偏低：它把 `cache_creation.ephemeral_5m_input_tokens` 整段
+  漏算，且不给 `claude-fable-5-1` 定价。改定价表后请重新跑一次这个对账。
