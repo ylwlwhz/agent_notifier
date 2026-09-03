@@ -303,7 +303,7 @@ claude
 | Component | Role | Install |
 |-----------|------|---------|
 | **agent-notifier** | Feishu interactive cards + remote input injection (this repo) | `install.sh`, fully automatic |
-| **statusLine** | Status-bar spend per rate-limit window + `cost-capture.js` feeding official metrics to completion cards | `install.sh` wires up cross-platform `scripts/statusline.sh` |
+| **statusLine** | Status-bar spend per rate-limit window and context use + `cost-capture.js` feeding official metrics to completion cards | `install.sh` wires up cross-platform `scripts/statusline.sh` |
 | **claude-remote-shell** | Redirects Claude's Bash tool commands to a remote host over SSH (optional) | `install.sh` fetches the script; mutagen installed separately |
 
 They are layer-separated and do not conflict: claude-remote-shell only redirects Bash tool commands, while TUI / hooks / statusLine all run locally.

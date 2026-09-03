@@ -7,10 +7,10 @@
 # 是重复信息，还要为它逆序读整个 transcript。
 # 也不再调 ccusage：它按【自己划的 5 小时块】和自然日聚合，块起点是「首条消息所在整点」，
 # 跟 Claude 的额度重置点没关系——限额那行写着「⟳2h11m 后重置」，消耗那行却在报另一个
-# 起点的 5 小时，两行对不上。现在第二行只留「本 5 小时窗口」「本周窗口」两个数，
-# 窗口起点由 rate_limits.resets_at 反推，跟第三行严格同一段时间；数由 cost-capture.js
-# 预先算好塞进 payload（见 src/lib/usage-window.js）。顺带甩掉了 npx 冷启动拉包导致
-# 慢渲染被 Claude 掐掉、状态栏长期冻住的老毛病。
+# 起点的 5 小时，两行对不上。现在第二行只留「本 5 小时窗口」「本周窗口」两个消耗数
+# （外加 payload 现成的上下文占用），窗口起点由 rate_limits.resets_at 反推，跟第三行
+# 严格同一段时间；数由 cost-capture.js 预先算好塞进 payload（见 src/lib/usage-window.js）。
+# 顺带甩掉了 npx 冷启动拉包导致慢渲染被 Claude 掐掉、状态栏长期冻住的老毛病。
 # 设计为 Linux / macOS 通用：只依赖 jq；缺失时静默输出空，绝不污染状态栏
 set -u
 
@@ -103,6 +103,12 @@ done < <(printf '%s' "$input" | jq -r '
     | to_entries[]
     | select(.value != null)
     | "\(.key)\t\(.value)"' 2>/dev/null)
+
+# ── 上下文占用：接在消耗行尾 ──
+# 这段原来由 ccusage 输出的最后一节（🧠 N%）提供，去掉 ccusage 时被一起带走了。
+# 它不来自 transcript 扫描，是 payload 里现成的字段，零成本，补回来。
+ctx=$(printf '%s' "$input" | jq -r '.context_window.used_percentage // empty | round' 2>/dev/null)
+[[ -n "$ctx" ]] && usage+="${usage:+ · }$(printf '🧠 %s%%' "$ctx")"
 
 # ── 三行输出：路径、消耗、限额各占一行 ──
 # 仓库路径动辄几十列，和后面的内容挤在一行会把它们挤掉（单行渲染是 truncate，
