@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 跨平台 statusLine：PS1 风格前缀（user@host:cwd）+ 限额窗口内的消耗 + 套餐限额（5h / 周）。
+# 跨平台 statusLine：PS1 风格前缀（user@host:cwd）+ 模型/消耗/上下文 + 套餐限额（5h / 周）。
 #
 # 由 agent-notifier install.sh 拷贝到 ~/.claude/statusline.sh。
 # 不再显示「最近一条 assistant 回复的时间」：Claude Code 自 2.1.24x 起自带这个
@@ -7,9 +7,10 @@
 # 是重复信息，还要为它逆序读整个 transcript。
 # 也不再调 ccusage：它按【自己划的 5 小时块】和自然日聚合，块起点是「首条消息所在整点」，
 # 跟 Claude 的额度重置点没关系——限额那行写着「⟳2h11m 后重置」，消耗那行却在报另一个
-# 起点的 5 小时，两行对不上。现在第二行只留「本 5 小时窗口」「本周窗口」两个消耗数
-# （外加 payload 现成的上下文占用），窗口起点由 rate_limits.resets_at 反推，跟第三行
-# 严格同一段时间；数由 cost-capture.js 预先算好塞进 payload（见 src/lib/usage-window.js）。
+# 起点的 5 小时，两行对不上。现在第二行的消耗只留「本 5 小时窗口」「本周窗口」两个数，
+# 窗口起点由 rate_limits.resets_at 反推，跟第三行严格同一段时间，由 cost-capture.js
+# 预先算好塞进 payload（见 src/lib/usage-window.js）；同行的模型与上下文则是 payload
+# 里现成的字段，白拿。ccusage 那行的 session / today / block / burn 一并去掉。
 # 顺带甩掉了 npx 冷启动拉包导致慢渲染被 Claude 掐掉、状态栏长期冻住的老毛病。
 # 设计为 Linux / macOS 通用：只依赖 jq；缺失时静默输出空，绝不污染状态栏
 set -u
@@ -90,11 +91,16 @@ done < <(printf '%s' "$input" | jq -r '
     | select(.value.used_percentage != null)
     | "\(.key)\t\(.value.used_percentage | round)\t\(.value.resets_at // 0)"' 2>/dev/null)
 
-# ── 消耗：限额窗口内的美元花费（全部会话），由 cost-capture.js 预先算好塞进 payload ──
-# 复用上面的 limit_label：消耗行与限额行的档位名刻意一模一样，上下对着看就是
+# ── 第二行：模型 · 各限额窗口的消耗 · 上下文占用 ──
+# 模型取 payload 现成的 .model.display_name：Claude 内部已经把型号 id 映射成
+# 「Opus 5」这种短标签（binary 里的 us(modelId)），不用自己维护对照表。
+# 顺序沿用原来 ccusage 那行的习惯：模型在最前，上下文在最后。
+usage=$(printf '%s' "$input" | jq -r '.model.display_name // empty' 2>/dev/null)
+
+# 消耗：限额窗口内的美元花费（全部会话），由 cost-capture.js 预先算好塞进 payload。
+# 复用上面的 limit_label：消耗与限额的档位名刻意一模一样，上下对着看就是
 # 「这段时间花了多少钱 / 用掉多少额度」。重置时刻只在限额行写一次，这里不重复。
-# 字段缺失（cost-capture 没接上、transcript 读不到）时整行不出现，不留空行。
-usage=""
+# 字段缺失（cost-capture 没接上、transcript 读不到）时这一段不出现，也不留空位。
 while IFS=$'\t' read -r u_key u_cost; do
     [[ -z "$u_key" ]] && continue
     usage+="${usage:+ · }$(printf '%s $%.2f' "$(limit_label "$u_key")" "$u_cost")"
@@ -104,9 +110,7 @@ done < <(printf '%s' "$input" | jq -r '
     | select(.value != null)
     | "\(.key)\t\(.value)"' 2>/dev/null)
 
-# ── 上下文占用：接在消耗行尾 ──
-# 这段原来由 ccusage 输出的最后一节（🧠 N%）提供，去掉 ccusage 时被一起带走了。
-# 它不来自 transcript 扫描，是 payload 里现成的字段，零成本，补回来。
+# 上下文占用：同样是 payload 现成的字段，不扫任何文件。
 ctx=$(printf '%s' "$input" | jq -r '.context_window.used_percentage // empty | round' 2>/dev/null)
 [[ -n "$ctx" ]] && usage+="${usage:+ · }$(printf '🧠 %s%%' "$ctx")"
 
