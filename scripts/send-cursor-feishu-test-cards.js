@@ -71,7 +71,7 @@ async function verifyNotifyCards(app) {
             tools: [
                 { tool: 'Shell', icon: '⚡', input: 'npm test -- --reporter=dot', result: '208 passing' },
                 { tool: 'StrReplace', icon: '✏️', input: 'src/apps/cursor-hook.js', result: '' },
-                // 失败没有独立卡片了，它就是这张摘要里的一步（❌ + 默认展开 + header 红标签）
+                // 失败没有独立卡片了，它就是这张摘要里的一步（标题 ❌ + header 红标签，照样折叠）
                 {
                     tool: failure.meta.toolName,
                     icon: failure.meta.icon,
@@ -86,7 +86,7 @@ async function verifyNotifyCards(app) {
         model: live.meta.model,
         projectName,
     }));
-    console.log('  ✔ 实时摘要卡（靛蓝、成功的步骤默认折叠、失败那步 ❌ 默认展开、无输入框）已发送');
+    console.log('  ✔ 实时摘要卡（靛蓝、工具一律默认折叠、失败那步标题带 ❌、无输入框）已发送');
 
     const stop = makeEvent({ hook_event_name: 'stop', status: 'completed' });
     await sendPlainCard(app, cards.buildFollowupCard({

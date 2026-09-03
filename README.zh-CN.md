@@ -346,8 +346,9 @@ SOUND_ENABLED=true
 三个宿主共用这一套语义。Codex 的输出来自 `~/.codex/sessions/*.jsonl`，Cursor 的直接来自
 hook payload（`postToolUse` 自带 `tool_input` / `tool_output`），都不靠终端文本猜测。
 
-失败的工具（`postToolUseFailure`）就是这张摘要卡里的一步：标 `❌`、默认展开、把 error_message
-放在「结果」的位置，卡片头上再挂一个红色的失败计数。**没有独立的失败卡**——每个失败工具发一张
+失败的工具（`postToolUseFailure`）就是这张摘要卡里的一步：标题写 `❌` + 失败原因，把
+error_message 放在「结果」的位置，卡片头上再挂一个红色的失败计数。它和其他步骤一样**默认折叠**
+——报错正文动辄几十行，自动展开只会把整张摘要撑长。**没有独立的失败卡**——每个失败工具发一张
 红卡太吵，而直接丢掉这个事件又会让失败的步骤从摘要里凭空消失。
 
 ### Cursor 专属配置

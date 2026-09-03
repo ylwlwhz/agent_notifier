@@ -496,7 +496,8 @@ function toolPreview(step) {
 
 /**
  * 单个工具 → 默认折叠面板：标题是图标+工具+命令首行，展开才看完整命令与结果。
- * 失败的那一步换成 ❌ 并默认展开——它不再有独立的失败卡，全靠这里被看见。
+ * 失败的那一步也一样折叠，只把 ❌ 与失败原因写进标题——失败要显眼，但显眼归标题和
+ * 卡头的红标签管，自动展开只会把报错正文糊在卡上，把整张摘要撑长。
  */
 function buildToolPanel(step, capture) {
     const preview = capture.tools ? toolPreview(step) : '';
@@ -518,7 +519,7 @@ function buildToolPanel(step, capture) {
     if (!body.length) body.push({ tag: 'markdown', content: '_（无更多详情）_' });
     return {
         tag: 'collapsible_panel',
-        expanded: !!step.failed,
+        expanded: false,
         header: { title: { tag: 'plain_text', content: title } },
         elements: body,
     };
