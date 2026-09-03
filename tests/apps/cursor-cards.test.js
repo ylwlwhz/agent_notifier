@@ -121,7 +121,7 @@ test('续写回调映射：结束本轮 = 空裁决（不给 followup_message）
     assert.deepEqual(cards.followupResponses().stop_now.decision, {});
 });
 
-test('失败的工具并进摘要卡：❌ + 原因 + 默认展开，header 上有红标签', () => {
+test('失败的工具并进摘要卡：❌ + 原因写在标题里，header 上有红标签', () => {
     const event = translateCursorHook(failureFixture);
     const failedStep = {
         tool: event.meta.toolName,
@@ -135,7 +135,7 @@ test('失败的工具并进摘要卡：❌ + 原因 + 默认展开，header 上�
 
     const panel = cards.buildToolPanel(failedStep, capture);
     assert.match(panel.header.title.content, /❌ Shell — 执行超时/);
-    assert.equal(panel.expanded, true, '失败那一步没有独立卡片了，得默认展开才看得见');
+    assert.equal(panel.expanded, false, '失败也跟着折叠：显眼靠标题和卡头红标签，不靠撑长卡片');
     const panelBody = collect(panel.elements, 'markdown').map((e) => e.content).join('\n');
     assert.match(panelBody, /报错/);
     assert.match(panelBody, /Command timed out after 30s/);

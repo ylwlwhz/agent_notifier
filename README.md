@@ -396,10 +396,12 @@ All three hosts share these semantics. Codex output comes from `~/.codex/session
 Cursor output comes straight from the hook payload (`postToolUse` carries `tool_input` and
 `tool_output`). Neither is inferred from terminal text.
 
-A failed tool (`postToolUseFailure`) is just another step in the same summary card — marked
-`❌`, expanded by default, with the error message in place of the output, and a red counter on
-the card header. There is no separate failure card: one red card per failed tool was noise, and
-dropping the event entirely would have made failed steps vanish from the summary.
+A failed tool (`postToolUseFailure`) is just another step in the same summary card — its title
+carries `❌` plus the failure reason, the error message takes the place of the output, and the
+card header gets a red counter. It stays collapsed like every other step; error text is long
+enough that auto-expanding it would just bloat the card. There is no separate failure card: one
+red card per failed tool was noise, and dropping the event entirely would have made failed
+steps vanish from the summary.
 
 ### Cursor-Specific Settings
 
