@@ -53,9 +53,13 @@ function captureRpc() {
 }
 
 /** 起一个真实子进程，喂几行 JSON-RPC，收集 stdout 上的响应 */
-function roundtrip(requests, { timeoutMs = 8000 } = {}) {
+function roundtrip(requests, { timeoutMs = 8000, env = {} } = {}) {
     return new Promise((resolve, reject) => {
-        const child = spawn(process.execPath, [SERVER], { stdio: ['pipe', 'pipe', 'pipe'] });
+        const child = spawn(process.execPath, [SERVER], {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            // dotenv 只跳过【已存在】的键，所以显式传空串就能盖住仓库 .env 里的同名项
+            env: { ...process.env, ...env },
+        });
         let out = '';
         const timer = setTimeout(() => { child.kill(); reject(new Error('子进程超时')); }, timeoutMs);
 
@@ -94,6 +98,63 @@ test('协议：tools/list 暴露 ask_user 与 ask_user_wait', async () => {
     assert.deepEqual(tools[1].inputSchema.required, ['pending_id']);
     // 工具描述必须点名让 agent 别用 AskQuestion —— 这是它被正确使用的关键
     assert.match(tools[0].description, /AskQuestion/);
+});
+
+// ── 归属过滤：共享 root 的机器上，别人的窗口不该拿到这个工具 ────────────────────
+//
+// GY_2 实测：同时跑着 5 个本服务进程，其中 4 个属于同事的窗口。他的 agent 调一次
+// ask_user，卡片就发到你手机上、他的会话阻塞最长 24 小时。MCP 进程拿不到账号信息
+// （环境里只有 WORKSPACE_FOLDER_PATHS），所以这条只能靠工作区路径拦。
+
+const OWNER_ENV = { CURSOR_NOTIFY_ROOTS: '/apdcephfs_private/qy/projects/whz', CURSOR_NOTIFY_USERS: '' };
+
+test('归属过滤：白名单内的工作区照常拿到两个工具', async () => {
+    const msgs = await roundtrip([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }], {
+        env: { ...OWNER_ENV, WORKSPACE_FOLDER_PATHS: '/apdcephfs_private/qy/projects/whz/agent_notifier' },
+    });
+    assert.deepEqual(msgs[0].result.tools.map((t) => t.name), ['ask_user', 'ask_user_wait']);
+});
+
+test('归属过滤：同事的工作区里 tools/list 直接为空，他的 agent 看不见这个工具', async () => {
+    const msgs = await roundtrip([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }], {
+        env: { ...OWNER_ENV, WORKSPACE_FOLDER_PATHS: '/apdcephfs_private/qy/projects/wjj/starVLA' },
+    });
+    assert.deepEqual(msgs[0].result.tools, []);
+});
+
+test('归属过滤：认不出工作区就不给（fail-closed）', async () => {
+    const msgs = await roundtrip([{ jsonrpc: '2.0', id: 1, method: 'tools/list' }], {
+        env: { ...OWNER_ENV, WORKSPACE_FOLDER_PATHS: '' },
+    });
+    assert.deepEqual(msgs[0].result.tools, []);
+});
+
+test('归属过滤：真被调到也要立刻给条能走的路，绝不能挂在那儿等', async () => {
+    const msgs = await roundtrip([{
+        jsonrpc: '2.0', id: 1, method: 'tools/call',
+        params: { name: 'ask_user', arguments: { question: '选 A 还是 B？' } },
+    }], {
+        env: { ...OWNER_ENV, WORKSPACE_FOLDER_PATHS: '/apdcephfs_private/qy/projects/wjj/starVLA' },
+    });
+
+    const text = msgs[0].result.content[0].text;
+    assert.match(text, /未启用/);
+    // 必须指回「正文列选项 + 结束本轮」，否则别人的 agent 只会重试或干等
+    assert.match(text, /结束本轮/);
+    assert.notEqual(msgs[0].result.isError, true, '报错在用户那边只显示「工具失败」，说明不了任何事');
+});
+
+test('没配白名单就不过滤：单人机器不该被逼着写配置', () => {
+    const saved = process.env.CURSOR_NOTIFY_ROOTS;
+    process.env.CURSOR_NOTIFY_ROOTS = '';
+    mcp.resetWorkspaceAllowed();
+    try {
+        assert.equal(mcp.workspaceAllowed(), true);
+    } finally {
+        if (saved === undefined) delete process.env.CURSOR_NOTIFY_ROOTS;
+        else process.env.CURSOR_NOTIFY_ROOTS = saved;
+        mcp.resetWorkspaceAllowed();
+    }
 });
 
 test('协议：通知没有 id，绝不能回响应（否则客户端会报协议错误）', async () => {

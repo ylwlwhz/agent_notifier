@@ -27,6 +27,7 @@ const { translateCursorHook } = require('../adapters/cursor/hook-adapter');
 const { conversationName } = require('../adapters/cursor/conversation-name');
 const {
     parseCursorControlConfig,
+    isOwnSession,
     shouldAskApproval,
     shouldWaitFollowup,
     timeoutDecision,
@@ -507,6 +508,16 @@ async function main() {
     if (!config.enabled) return emit({});
 
     const event = translateCursorHook(payload);
+
+    // 归属过滤必须是【最靠前】的一道：共享 root 的机器上，hooks.json 对所有人生效，
+    // 同事的会话也会走到这里。不光不能发卡、不能注入提问引导，连读他的 transcript
+    // 取会话名都不该做——那本身就是在碰别人的内容。
+    if (!isOwnSession(config, event)) {
+        console.error(`[cursor-hook] 跳过非本人会话：${event.meta.workspaceRoot || '未知工作区'}`
+            + `${event.meta.userEmail ? ` / ${event.meta.userEmail}` : ''}`);
+        return emit({});
+    }
+
     // 会话名要在这里补：翻译层是纯函数，读 transcript 是 I/O，不该塞进去
     event.meta.conversationName = conversationName(event);
 

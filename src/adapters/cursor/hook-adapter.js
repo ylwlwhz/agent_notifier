@@ -184,6 +184,8 @@ function translateCursorHook(payload = {}) {
         projectName: resolveProjectName(payload),
         cwd: payload.cwd || '',
         transcriptPath: payload.transcript_path || null,
+        // 驱动这次会话的 Cursor 账号。共享机器上靠它区分「谁的会话」（见 isOwnSession）
+        userEmail: payload.user_email || '',
     };
 
     let title = 'Cursor';

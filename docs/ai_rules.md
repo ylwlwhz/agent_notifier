@@ -176,6 +176,34 @@ listener: 收到卡片回调 → resolve(id, decision)     ──┘ → hook �
   （实测文件 mtime 落后当前时间半小时），等它写出来问题早过去了。所以「盯 transcript
   实时提醒」这条路不要再试。
 
+#### 共享机器上的会话归属（隐私边界，不是可选优化）
+
+2026-09-04 在 GY_2 上查实：**这台机没有非 root 账号，十几个人共用同一个 root**
+（`/apdcephfs_private/qy/projects/` 下有 cxs / fsq / harryzhr / lys / whz / wjj / … 各自的目录）。
+而 `~/.cursor/hooks.json` 与 `~/.cursor/mcp.json` 都是**用户级**的，于是三个出口全都对所有人生效：
+
+| 出口 | 实测证据 |
+|------|---------|
+| 发卡 | `/tmp/cursor-name-256b3a74.json` 属于同事的 `wjj/starVLA` 会话 |
+| 提示词注入 | `/tmp/cursor-steer-256b3a74.json`、`cursor-steer-34ad14a1.json` 同样是他的会话 |
+| `ask_user` | 同时跑着 5 个 `agent-notifier-ask` 进程，**4 个属于同事的窗口** |
+
+最坏的一条不是漏卡片，而是：注入的引导让**他的** agent 去调 `ask_user` → 卡片发到**你**的
+飞书 → 他的会话阻塞最长 24 小时，而他只看到 agent 卡住不动，无从知道原因。反向同样成立：
+你对着他的完成卡打字，会作为 `followup_message` 注入他的会话。
+
+对策是 `isOwnSession()`（`control-policy.js`）+ `workspaceAllowed()`（`cursor-ask-mcp.js`），
+由 `CURSOR_NOTIFY_ROOTS` / `CURSOR_NOTIFY_USERS` 配置，两道都不配就不过滤。三条纪律别退回去：
+
+1. **路径那道是必需的**，不能只靠账号：MCP 进程**拿不到 `user_email`**（实测环境里只有
+   `WORKSPACE_FOLDER_PATHS`），所以「别人的 agent 调 ask_user」只能靠工作区路径拦。
+2. **过滤要放在 `main()` 最靠前**，早于 `conversationName()` 与 `trackActivity()`。
+   不光是别发卡——读他的 transcript 取会话名本身就是在碰别人的内容，给他的会话刷心跳
+   会让看门狗替他发告警卡。
+3. **两道判据的失败方向刻意不同**：路径认不出就**不发**（宁可漏卡）；`user_email` 缺失则
+   **不作判断**（老版本 cursor-server 未必带这个字段，硬判会把自己的通知静默掐掉，
+   就是「GY_2 怎么又不发消息了」那类极难排查的故障）。
+
 **payload 里没有会话名（2026-09-04 真机探针，Cursor 3.17.19）**：`postToolUse` 的全部字段是
 `conversation_id`、`generation_id`、`model`、`tool_name`、`tool_input`、`tool_output`、
 `duration`、`tool_use_id`、`cwd`、`session_id`、`hook_event_name`、`cursor_version`、
