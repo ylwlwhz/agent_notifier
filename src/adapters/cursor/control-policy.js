@@ -14,6 +14,8 @@
  *   续写 → {}（本轮正常结束）
  */
 
+const path = require('path');
+
 const DEFAULT_APPROVAL_TIMEOUT_SEC = 180;
 const DEFAULT_FOLLOWUP_TIMEOUT_SEC = 300;
 // 15 分钟而不是 3 分钟：agent 组织长回复或做大上下文思考时【什么事件都不产生】，
@@ -71,6 +73,60 @@ const QUESTION_STEER_REMINDER = [
     'hook 也不结束本轮，用户在手机上既看不到问题也无法回答，会话会一直静止。',
 ].join('\n');
 
+/**
+ * 会话归属过滤 —— 共享机器上这是隐私边界，不是可选优化。
+ *
+ * 内网机（GY_2 那类）常常没有非 root 账号，十几个人共用同一个 root 登录，于是
+ * `~/.cursor/hooks.json` 与 `~/.cursor/mcp.json` 都是**所有人共用**的。实测后果：
+ *   - 同事的 Cursor 会话触发本仓库的 hook，卡片发进你的飞书群（/tmp 里留下了
+ *     他会话的 cursor-name / cursor-steer 标记，工作区路径是他自己的目录）
+ *   - 注入的提问引导还会让【他的】agent 去调 ask_user —— 于是他的会话阻塞在你的
+ *     手机上最长 24 小时，他看到的只是 agent 卡住不动，无从知道原因
+ *   - 你对着他的完成卡打字，会作为 followup_message 注入他的会话
+ *
+ * 两道判据，配了哪道生效哪道；都不配就不过滤（单人机器无需任何配置）：
+ *   `CURSOR_NOTIFY_ROOTS`  只认这些工作区路径前缀
+ *   `CURSOR_NOTIFY_USERS`  只认这些 Cursor 账号（payload 的 `user_email`）
+ *
+ * 路径那道必须有：MCP 进程拿不到 `user_email`（环境里只有 `WORKSPACE_FOLDER_PATHS`），
+ * 所以「别人的 agent 调 ask_user」这条只能靠路径拦（见 cursor-ask-mcp.js）。
+ */
+function normalizeRoot(value) {
+    const raw = String(value || '').trim();
+    return raw ? path.resolve(raw) : '';
+}
+
+/** 路径前缀匹配，带边界：`/a/whz` 不该匹配上 `/a/whz-backup` */
+function underRoot(target, root) {
+    if (!target || !root) return false;
+    const p = path.resolve(String(target));
+    return p === root || p.startsWith(root + path.sep);
+}
+
+/**
+ * 这个事件属于「我的」会话吗。
+ *
+ * 路径判据【fail-closed】：配了白名单却认不出工作区，就当不是我的。共享机器上宁可
+ * 漏一张卡，也不能把同事的会话内容发出去。
+ * 账号判据【只在拿得到时生效】：payload 里没有 `user_email` 就不作判断。老版本
+ * cursor-server 未必带这个字段，那种情况下 fail-closed 会把自己的通知也静默掐掉
+ * （「GY_2 怎么又不发消息了」那类故障排查成本极高），而路径那道已经兜住了实际风险。
+ */
+function isOwnSession(config, event) {
+    const owner = config && config.owner;
+    if (!owner) return true;
+
+    if (owner.roots.length) {
+        const root = event && event.meta && event.meta.workspaceRoot;
+        if (!owner.roots.some((r) => underRoot(root, r))) return false;
+    }
+    if (owner.users.length) {
+        const email = String((event && event.meta && event.meta.userEmail) || '').trim().toLowerCase();
+        if (email && !owner.users.includes(email)) return false;
+    }
+    return true;
+}
+
 function truthy(value, fallback = false) {
     const raw = String(value == null ? '' : value).trim().toLowerCase();
     if (!raw) return fallback;
@@ -107,6 +163,11 @@ function parseCursorControlConfig(env = process.env) {
     return {
         enabled: truthy(env.CURSOR_NOTIFY_ENABLED, true),
         notifyStop: truthy(env.CURSOR_NOTIFY_STOP, true),
+        // 共享机器上的隐私边界，两道都不配就不过滤（见 isOwnSession）
+        owner: {
+            roots: parseList(env.CURSOR_NOTIFY_ROOTS).map(normalizeRoot).filter(Boolean),
+            users: parseList(env.CURSOR_NOTIFY_USERS).map((s) => s.toLowerCase()),
+        },
         // 默认开：不开的话「选择题」这类交互永远无法远程作答（见 QUESTION_STEER_CONTEXT）
         steerQuestions: truthy(env.CURSOR_STEER_QUESTIONS, true),
         // 同一会话里隔多久在 postToolUse 上补打一次引导（见 QUESTION_STEER_REMINDER）
@@ -205,6 +266,8 @@ function renderHookOutput(eventName, decision = {}) {
 
 module.exports = {
     parseCursorControlConfig,
+    isOwnSession,
+    underRoot,
     shouldAskApproval,
     shouldWaitFollowup,
     timeoutDecision,

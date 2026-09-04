@@ -88,6 +88,52 @@ const CALL_MARGIN_MS = 5 * 60 * 1000;
 // 拿不到 progressToken 时的单段上限：必须明显短于 idle 上限
 const NO_TOKEN_CHUNK_MS = 90 * 1000;
 
+// 归属过滤的结论：一个 MCP 进程只服务一个工作区，算一次就定了
+let workspaceAllowedCache = null;
+
+/**
+ * 这个 MCP 进程服务的工作区，在 `CURSOR_NOTIFY_ROOTS` 白名单里吗。
+ *
+ * 为什么这里只能按路径判：MCP 进程**拿不到任何账号信息**。实测它的环境里只有
+ * `WORKSPACE_FOLDER_PATHS`（还有 VSCODE_* / CURSOR_LAYOUT 之类），没有 hook payload
+ * 里那个 `user_email`。所以共享 root 的机器上，「同事的 agent 调 ask_user」这条路
+ * 只能靠工作区路径拦住。
+ *
+ * 拦不住的后果实测过：GY_2 上同时跑着 5 个本服务进程，其中 4 个属于同事的窗口。
+ * 他的 agent 调一次 ask_user，卡片就发到你手机上，他的会话则阻塞最长 24 小时，
+ * 而他只看到 agent 卡住不动。
+ *
+ * 判不出工作区就当【不是自己的】：宁可让本服务在这个窗口里不可用，
+ * 也不能把别人的会话挂在你的飞书上。
+ */
+function workspaceAllowed() {
+    if (workspaceAllowedCache !== null) return workspaceAllowedCache;
+
+    require('../lib/env-config');
+    const { parseCursorControlConfig, underRoot } = require('../adapters/cursor/control-policy');
+    const roots = parseCursorControlConfig().owner.roots;
+    if (!roots.length) {
+        workspaceAllowedCache = true;   // 没配白名单 = 单人机器，不过滤
+        return true;
+    }
+
+    const folders = String(process.env.WORKSPACE_FOLDER_PATHS || '')
+        .split(path.delimiter)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    // every 而不是 some：多根工作区里只要混进一个别人的目录，就不该放行
+    workspaceAllowedCache = folders.length > 0 && folders.every((f) => roots.some((r) => underRoot(f, r)));
+    if (!workspaceAllowedCache) {
+        log(`工作区不在 CURSOR_NOTIFY_ROOTS 内，本进程不提供 ask_user：${folders.join(', ') || '未知'}`);
+    }
+    return workspaceAllowedCache;
+}
+
+/** 只给测试用：真实进程里工作区一辈子不变，没有重算的场景 */
+function resetWorkspaceAllowed() {
+    workspaceAllowedCache = null;
+}
+
 function timeoutMs() {
     const n = parseFloat(process.env.CURSOR_ASK_TIMEOUT_SEC);
     return (Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_SEC) * 1000;
@@ -504,12 +550,25 @@ async function handle(msg) {
             return reply(id, {});
 
         case 'tools/list':
-            return reply(id, { tools: [ASK_TOOL, WAIT_TOOL] });
+            // 不属于自己的工作区就干脆不宣告工具：别人的 agent 看不见它，也就不会调它，
+            // 这比等它调完再拒绝干净得多
+            return reply(id, { tools: workspaceAllowed() ? [ASK_TOOL, WAIT_TOOL] : [] });
 
         case 'tools/call': {
             const args = params?.arguments || {};
             if (params?.name !== ASK_TOOL.name && params?.name !== WAIT_TOOL.name) {
                 return replyError(id, -32602, `未知工具: ${params?.name}`);
+            }
+            // 万一 agent 手里还攥着上一次 tools/list 的缓存：给它一条能走的路，
+            // 而不是报错（报错在用户那边显示成「工具失败」，什么也说明不了）
+            if (!workspaceAllowed()) {
+                return reply(id, {
+                    content: [{
+                        type: 'text',
+                        text: '此工作区未启用 agent-notifier 远程提问。'
+                            + '请把问题和候选项编上号写进正文，然后结束本轮，由用户直接回复。',
+                    }],
+                });
             }
             if (params.name === ASK_TOOL.name && !String(args.question || '').trim()) {
                 return reply(id, { isError: true, content: [{ type: 'text', text: 'question 不能为空' }] });
@@ -576,6 +635,8 @@ if (require.main === module) main();
 module.exports = {
     handle,
     protectStdout,
+    workspaceAllowed,
+    resetWorkspaceAllowed,
     askUser,
     waitChunk,
     cancelRequest,

@@ -398,6 +398,13 @@ Cursor output comes straight from the hook payload (`postToolUse` carries `tool_
 In the summary card, the `❯ Cursor` panel holds the agent's own words and is always expanded
 regardless of length; tool steps are always collapsed.
 
+> **On a machine where several people share one OS account, set `CURSOR_NOTIFY_ROOTS` first.**
+> Both `~/.cursor/hooks.json` and `~/.cursor/mcp.json` are user-level, so a colleague's Cursor
+> session triggers this repo too: their cards land in your Feishu chat, and the injected
+> question-steering makes *their* agent call `ask_user` — which blocks their session on your
+> phone for up to 24 hours while all they see is a stalled agent. Measured on one shared box:
+> 4 of the 5 running MCP server processes belonged to someone else's windows.
+
 Every Cursor card carries a **conversation name** as its subtitle (same shape as the Claude
 cards) so you can tell parallel conversations apart. Cursor's hook payload has no title field,
 so the name is taken from the first user message in `transcript_path` — the same thing Cursor
@@ -416,6 +423,8 @@ steps vanish from the summary.
 |----------|---------|---------|
 | `CURSOR_NOTIFY_ENABLED` | `1` | Master switch; off means no Cursor cards at all |
 | `CURSOR_NOTIFY_STOP` | `1` | Send a completion card when a task ends |
+| `CURSOR_NOTIFY_ROOTS` | empty | **Required on shared machines**: only serve these workspace path prefixes (comma-separated); empty = no filtering |
+| `CURSOR_NOTIFY_USERS` | empty | Only serve these Cursor accounts (`user_email`); second line of defence |
 | `CURSOR_REMOTE_APPROVAL` | `0` | **Remote approval**: approve/deny Shell and MCP calls from Feishu |
 | `CURSOR_APPROVAL_TIMEOUT_SEC` | `180` | Approval wait cap; on timeout falls back to Cursor's own dialog |
 | `CURSOR_APPROVAL_MATCHER` | empty | JS regex; only ask about matching commands (empty = ask about all, noisy) |

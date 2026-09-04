@@ -348,6 +348,11 @@ hook payload（`postToolUse` 自带 `tool_input` / `tool_output`），都不靠�
 
 摘要卡里 `❯ Cursor` 那段是 agent 的回话，**默认展开**（不论多长）；工具步骤一律默认折叠。
 
+> **多人共用一个账号的机器要先配 `CURSOR_NOTIFY_ROOTS`。** `~/.cursor/hooks.json` 与
+> `~/.cursor/mcp.json` 都是用户级的，同事的 Cursor 会话会一起触发本仓库：卡片发进你的飞书群，
+> 注入的提问引导还会让**他的** agent 去调 `ask_user` —— 他的会话就阻塞在你手机上（最长 24
+> 小时），而他只看到 agent 卡住不动。GY_2 上实测过：5 个 MCP 进程里 4 个属于同事的窗口。
+
 所有 Cursor 卡片的标题下面会带一行**会话名**（与 Claude 卡同款形态），用来区分同时开着的
 多个对话。Cursor 的 hook payload 里没有名称字段（真机探针确认），这个名字取自 `transcript_path`
 的第一条用户消息 —— Cursor 自己也是照它起标题的。取不到就不显示这一行。
@@ -363,6 +368,8 @@ error_message 放在「结果」的位置，卡片头上再挂一个红色的失
 |------|------|------|
 | `CURSOR_NOTIFY_ENABLED` | `1` | 总开关，关掉则 Cursor 相关卡片全不发 |
 | `CURSOR_NOTIFY_STOP` | `1` | 任务结束发完成卡 |
+| `CURSOR_NOTIFY_ROOTS` | 空 | **共享机器必配**：只服务这些工作区路径前缀（逗号分隔），空=不过滤 |
+| `CURSOR_NOTIFY_USERS` | 空 | 只服务这些 Cursor 账号（`user_email`），第二道保险 |
 | `CURSOR_REMOTE_APPROVAL` | `0` | **远程审批**：飞书上批准 / 拒绝 Shell 与 MCP 调用 |
 | `CURSOR_APPROVAL_TIMEOUT_SEC` | `180` | 审批等待上限，超时回落到 Cursor 本地弹窗 |
 | `CURSOR_APPROVAL_MATCHER` | 空 | JS 正则，只对匹配的命令要审批（空=全部都问，很吵） |

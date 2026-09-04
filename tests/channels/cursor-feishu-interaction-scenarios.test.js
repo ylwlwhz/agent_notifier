@@ -481,6 +481,99 @@ test('实时摘要全关时照样补打引导：这是两件不相干的事', (t
     assert.equal(fs.existsSync(cursorHook.liveBufferPath(event.sessionKey)), false);
 });
 
+// ── 归属过滤：同事的会话必须在最靠前就被挡掉 ──────────────────────────────────
+//
+// 共享 root 的机器上 hooks.json 对所有人生效。挡的位置很关键：不光不能发卡、不能注入
+// 提问引导，连「读他的 transcript 取会话名」「给他的会话刷卡死心跳」都不该发生。
+
+const MINE_ROOT = '/apdcephfs_private/qy/projects/whz';
+const HOOK_ENTRY = path.join(__dirname, '..', '..', 'cursor-hook-handler.js');
+
+/**
+ * 跑真正的 hook 入口（子进程，stdin 喂 payload、stdout 收裁决）。
+ * 凭据一律置空：即便过滤失效也发不出卡，但落盘的副作用照旧可观测。
+ */
+function runHook(payload, env = {}) {
+    return new Promise((resolve, reject) => {
+        const child = require('child_process').spawn(process.execPath, [HOOK_ENTRY], {
+            stdio: ['pipe', 'pipe', 'ignore'],
+            // dotenv 只跳过【已存在】的键，置空串就能盖住仓库 .env 里的同名项
+            env: { ...process.env, FEISHU_APP_ID: '', FEISHU_APP_SECRET: '', FEISHU_LIVE_CAPTURE: '1', ...env },
+        });
+        let out = '';
+        const timer = setTimeout(() => { child.kill(); reject(new Error('hook 子进程超时')); }, 15000);
+        child.stdout.on('data', (d) => { out += d; });
+        child.on('error', (err) => { clearTimeout(timer); reject(err); });
+        child.on('close', () => {
+            clearTimeout(timer);
+            try { resolve(JSON.parse(out.trim().split('\n').filter(Boolean).pop() || '{}')); }
+            catch (err) { reject(err); }
+        });
+        child.stdin.end(JSON.stringify(payload));
+    });
+}
+
+/** 一个会话在 /tmp 里会留下的全部痕迹 */
+function traces(sessionKey) {
+    return {
+        steer: cursorHook.steerMarkerPath(sessionKey),
+        live: cursorHook.liveBufferPath(sessionKey),
+        name: require('../../src/adapters/cursor/conversation-name').cachePath(sessionKey),
+        activity: require('../../src/apps/cursor-stall-watch').activityPath(sessionKey),
+    };
+}
+
+function toolPayload(conversationId, workspaceRoot, transcriptPath) {
+    return {
+        hook_event_name: 'postToolUse',
+        conversation_id: conversationId,
+        workspace_roots: [workspaceRoot],
+        tool_name: 'Shell',
+        tool_input: { command: 'ls' },
+        transcript_path: transcriptPath,
+    };
+}
+
+test('非本人会话：跑完整条 main 也不留任何痕迹（不读 transcript、不刷心跳、不打引导）', async (t) => {
+    const key = 'conv-oth';
+    const files = traces(key);
+    t.after(() => Object.values(files).forEach((f) => {
+        try { fs.unlinkSync(f); } catch { /* 本来就不该存在 */ }
+    }));
+
+    const out = await runHook(
+        toolPayload('conv-other-000001', '/apdcephfs_private/qy/projects/wjj/starVLA', '/tmp/not-read-9a1c.jsonl'),
+        { CURSOR_NOTIFY_ROOTS: MINE_ROOT },
+    );
+
+    assert.deepEqual(out, {}, '必须回一个「不干预」的空裁决');
+    assert.equal(fs.existsSync(files.steer), false, '不该给别人的会话打提问引导');
+    assert.equal(fs.existsSync(files.live), false, '不该攒别人的执行流水');
+    assert.equal(fs.existsSync(files.name), false, '连会话名都不该算 —— 那是在读别人的 transcript');
+    assert.equal(fs.existsSync(files.activity), false, '不该刷心跳，否则看门狗会替他发告警卡');
+});
+
+test('同一条 payload 换成自己的工作区：痕迹照旧产生（证明上一条不是空过）', async (t) => {
+    const key = 'conv-min';
+    const files = traces(key);
+    const transcript = path.join(os.tmpdir(), `an-own-${process.pid}.jsonl`);
+    fs.writeFileSync(transcript, JSON.stringify({
+        role: 'user', message: { content: [{ type: 'text', text: '<user_query>我自己的活</user_query>' }] },
+    }) + '\n', 'utf8');
+    t.after(() => [transcript, ...Object.values(files)].forEach((f) => {
+        try { fs.unlinkSync(f); } catch { /* 没写成 */ }
+    }));
+
+    await runHook(
+        toolPayload('conv-mine-000001', `${MINE_ROOT}/agent_notifier`, transcript),
+        { CURSOR_NOTIFY_ROOTS: MINE_ROOT },
+    );
+
+    assert.equal(fs.existsSync(files.live), true, '自己的会话就该攒执行流水');
+    assert.equal(fs.existsSync(files.activity), true, '自己的会话就该刷心跳');
+    assert.equal(JSON.parse(fs.readFileSync(files.name, 'utf8')).name, '我自己的活');
+});
+
 // ── postToolUseFailure：失败并进摘要卡，不再单独发红卡 ────────────────────────
 
 /** 落盘但不真的 flush：flush 子进程会去发飞书卡片，测试里不能让它跑起来 */
