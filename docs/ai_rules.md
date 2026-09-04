@@ -176,6 +176,15 @@ listener: 收到卡片回调 → resolve(id, decision)     ──┘ → hook �
   （实测文件 mtime 落后当前时间半小时），等它写出来问题早过去了。所以「盯 transcript
   实时提醒」这条路不要再试。
 
+**payload 里没有会话名（2026-09-04 真机探针，Cursor 3.17.19）**：`postToolUse` 的全部字段是
+`conversation_id`、`generation_id`、`model`、`tool_name`、`tool_input`、`tool_output`、
+`duration`、`tool_use_id`、`cwd`、`session_id`、`hook_event_name`、`cursor_version`、
+`workspace_roots`、`user_email`、`transcript_path`。侧边栏那个标题是 IDE 客户端生成、存在
+本机工作区状态里的，**Remote-SSH 时 hook 跑在远程机上，那份状态不在同一台机器**，读不到。
+所以会话名取 `transcript_path` 的第一条用户消息（`conversation-name.js`）——Cursor 自己也是
+照它起标题的，而且它对一个会话恒定不变。算过一次就缓存到 `/tmp/cursor-name-<key>.json`，
+`stop` 万一不带 `transcript_path` 也能靠缓存报出名字。
+
 **根本原因（这条决定了架构上限）**：hooks 是**旁路观察者 + 否决者**，不是输入通道。
 Claude/Codex 能随时回是因为终端里有个活着的 TUI 停在提示符前，可以灌字节；
 Cursor 的 composer 是 GUI，没有等价物。要突破这个上限，必须让**会话的所有权翻转** ——
@@ -521,6 +530,8 @@ nc/ncat/socat/corkscrew 全缺）打隧道。这个脚本原先只在 `tencent` 
 - **助手正文面板反过来，恒定默认展开**（`assistantPanel()`，摘要卡与 CLI 轮次卡共用）。
   工具是过程、该折叠；这段是 agent 说给人听的结论，是整张卡里最该被读到的东西。
   **别再改回「按正文长度决定展不展开」**——长回答恰恰是最需要直接看到的那种。
+- **会话名作副标题**（`subtitleFor()`，与 Claude 卡同款形态）。同时开着本机和几台远程机时，
+  光看「Cursor 完成」根本不知道是哪个对话结束了。取不到名字就不渲染副标题。
 - 完成卡分两态：`waiting=true`（有 hook 正阻塞等你）才挂输入框与「结束本轮」按钮；
   `waiting=false` 是纯通知卡，不放任何交互组件。
 - 审批卡必须把「等多久、超时后会怎样」写在卡面上。

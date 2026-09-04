@@ -52,6 +52,17 @@ function footerFor(event, extra = {}) {
     });
 }
 
+/**
+ * 会话名作副标题（与 Claude 卡同款形态：标题下面那一行就是这个对话叫什么）。
+ *
+ * 同时开着本机和好几台远程机的会话时，光看「Cursor 完成」根本不知道是哪个对话结束了。
+ * Cursor 的 payload 里没有名称字段，这个名字是 conversation-name.js 从 transcript
+ * 的第一条用户消息取的，取不到就不渲染副标题（card2 对空值是跳过）。
+ */
+function subtitleFor(event) {
+    return event?.meta?.conversationName || '';
+}
+
 /** 长文本切块，避免飞书截断（rule §6：长文本必须分块） */
 function splitText(text, size = TEXT_CHUNK) {
     const raw = String(text == null ? '' : text);
@@ -146,6 +157,7 @@ function buildApprovalCard({ event, stateKey, timeoutMs }) {
     return card2({
         template: 'orange',
         title: `${event.title} · Cursor`,
+        subtitle: subtitleFor(event),
         elements,
     });
 }
@@ -199,6 +211,7 @@ function buildFollowupCard({ event, stateKey, body, timeoutMs, waiting }) {
         template: style.template,
         icon: style.icon || undefined,
         title,
+        subtitle: subtitleFor(event),
         tags: waiting ? [{ text: '等待续写', color: 'orange' }] : [],
         elements,
     });
@@ -337,6 +350,7 @@ function buildSettledCard({ event, statusText, template = 'grey' }) {
         template,
         icon: '',
         title: `${event.title} · 已处理`,
+        subtitle: subtitleFor(event),
         elements: [
             { tag: 'markdown', content: statusText },
             { tag: 'hr' },
@@ -375,6 +389,7 @@ function buildSettledFollowupCard({ event, body, statusText }) {
         template: style.template,
         icon: style.icon || undefined,
         title: event.meta?.isSubagent ? event.title : style.title,
+        subtitle: subtitleFor(event),
         elements,
     });
 }
@@ -467,7 +482,7 @@ function askResponses(options = []) {
  * 摆一个输入框只会骗人——用户打了字没有任何进程能接。它的唯一职责是把人叫回 IDE，
  * 所以正文要把「为什么飞书这边帮不上」说清楚，而不是含糊地说一句「似乎卡住了」。
  */
-function buildStallCard({ body, idleMs, projectName, model }) {
+function buildStallCard({ body, idleMs, projectName, model, conversationName = '' }) {
     const min = Math.max(1, Math.round((idleMs || 0) / 60000));
     const elements = [{
         tag: 'markdown',
@@ -490,6 +505,7 @@ function buildStallCard({ body, idleMs, projectName, model }) {
         template: 'yellow',
         icon: 'warning_outlined',
         title: 'Cursor 疑似在等你确认',
+        subtitle: conversationName,
         tags: [{ text: '需回 IDE', color: 'yellow' }],
         elements,
     });
@@ -538,7 +554,7 @@ function buildToolPanel(step, capture) {
  * 一轮一张卡：本轮所有「助手文字段 + 其后的工具」合并进同一张（与 claude-live 同款形态）。
  * 刻意不带输入框：Cursor 运行中没有可回流的输入通道。
  */
-function buildLiveCard({ segments, capture, model, projectName }) {
+function buildLiveCard({ segments, capture, model, projectName, conversationName = '' }) {
     const elements = [];
     let steps = 0;
     let failed = 0;
@@ -562,6 +578,7 @@ function buildLiveCard({ segments, capture, model, projectName }) {
     return card2({
         template: 'indigo',
         title: '执行摘要',
+        subtitle: conversationName,
         tags,
         elements,
     });
@@ -585,6 +602,7 @@ module.exports = {
     approvalResponses,
     followupResponses,
     cursorFooter,
+    subtitleFor,
     splitText,
     clipBody,
     APPROVAL_RESPONSES,

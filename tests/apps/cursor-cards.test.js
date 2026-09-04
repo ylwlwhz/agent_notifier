@@ -244,6 +244,37 @@ test('实时摘要卡：正文默认展开、工具默认折叠、标题只有�
     assert.match(footerText(card), /🤖 Cursor/);
 });
 
+test('会话名作副标题（Claude 卡同款形态）：一眼看出这张卡是哪个对话发的', () => {
+    const named = (fixture) => {
+        const event = translateCursorHook(fixture);
+        event.meta.conversationName = '移除 cursor 工具失败的卡片';
+        return event;
+    };
+
+    const stop = named(stopFixture);
+    const approval = named(shellFixture);
+
+    for (const card of [
+        cards.buildFollowupCard({ event: stop, stateKey: 'k', body: '已完成', timeoutMs: 0, waiting: true }),
+        cards.buildSettledFollowupCard({ event: stop, body: '已完成', statusText: '⏹ 已结束本轮' }),
+        cards.buildApprovalCard({ event: approval, stateKey: 'k', timeoutMs: 1000 }),
+        cards.buildSettledCard({ event: approval, statusText: '✅ 已允许' }),
+        cards.buildLiveCard({
+            segments: [{ text: '在改', tools: [] }],
+            capture: { tools: true, output: true, results: true },
+            model: '', projectName: '', conversationName: '移除 cursor 工具失败的卡片',
+        }),
+        cards.buildStallCard({ body: '', idleMs: 900000, projectName: '', model: '', conversationName: '移除 cursor 工具失败的卡片' }),
+    ]) {
+        assert.equal(card.header.subtitle.content, '移除 cursor 工具失败的卡片',
+            `卡片 ${card.header.title.content} 少了副标题`);
+    }
+
+    // 取不到名字就别渲染一个空副标题出来
+    const anon = cards.buildFollowupCard({ event: translateCursorHook(stopFixture), waiting: false });
+    assert.equal(anon.header.subtitle, undefined);
+});
+
 test('正文再长也默认展开：长回答恰恰是最需要直接看到的那种', () => {
     const long = '这是一段很长的结论。'.repeat(80);
     for (const card of [
