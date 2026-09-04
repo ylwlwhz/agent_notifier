@@ -65,6 +65,22 @@ function markdownBlocks(text) {
     return splitText(text).map((chunk) => ({ tag: 'markdown', content: chunk }));
 }
 
+/**
+ * 助手正文 → 面板，**默认展开**。
+ *
+ * 跟工具面板刻意反着来：工具是过程，折叠起来只留一行标题；这段是 agent 真正说给你听的
+ * 结论，也是一张摘要卡里最该被读到的东西，藏进折叠面板等于白发一张卡。
+ * 别再改回「按长度决定展不展开」——长回答恰恰是最需要直接看到的那种。
+ */
+function assistantPanel(text) {
+    return {
+        tag: 'collapsible_panel',
+        expanded: true,
+        header: { title: { tag: 'plain_text', content: '❯ Cursor' } },
+        elements: markdownBlocks(text),
+    };
+}
+
 /** 正文超长时只留最新一段：越靠后的内容越是用户此刻要看的 */
 function clipBody(text) {
     const raw = String(text == null ? '' : text).trim();
@@ -236,14 +252,7 @@ function buildCliTurnCard({
 
     segments.forEach((seg, idx) => {
         if (idx > 0) elements.push({ tag: 'hr' });
-        if (capture.output && seg.text) {
-            elements.push({
-                tag: 'collapsible_panel',
-                expanded: seg.text.length < 400,
-                header: { title: { tag: 'plain_text', content: '❯ Cursor' } },
-                elements: markdownBlocks(seg.text),
-            });
-        }
+        if (capture.output && seg.text) elements.push(assistantPanel(seg.text));
         (seg.tools || []).forEach((step) => {
             elements.push(buildToolPanel(step, capture));
             steps++;
@@ -536,14 +545,7 @@ function buildLiveCard({ segments, capture, model, projectName }) {
 
     segments.forEach((seg, idx) => {
         if (idx > 0) elements.push({ tag: 'hr' });
-        if (capture.output && seg.text) {
-            elements.push({
-                tag: 'collapsible_panel',
-                expanded: seg.text.length < 200,
-                header: { title: { tag: 'plain_text', content: '❯ Cursor' } },
-                elements: markdownBlocks(seg.text),
-            });
-        }
+        if (capture.output && seg.text) elements.push(assistantPanel(seg.text));
         (seg.tools || []).forEach((step) => {
             elements.push(buildToolPanel(step, capture));
             steps++;

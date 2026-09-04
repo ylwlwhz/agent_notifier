@@ -396,6 +396,9 @@ All three hosts share these semantics. Codex output comes from `~/.codex/session
 Cursor output comes straight from the hook payload (`postToolUse` carries `tool_input` and
 `tool_output`). Neither is inferred from terminal text.
 
+In the summary card, the `❯ Cursor` panel holds the agent's own words and is always expanded
+regardless of length; tool steps are always collapsed.
+
 A failed tool (`postToolUseFailure`) is just another step in the same summary card — its title
 carries `❌` plus the failure reason, the error message takes the place of the output, and the
 card header gets a red counter. It stays collapsed like every other step; error text is long

@@ -210,7 +210,7 @@ test('收敛卡：交互组件全撤、结果写在正文（交互卡靠超时/�
     assert.match(collect(card.body.elements, 'markdown')[0].content, /已超时/);
 });
 
-test('实时摘要卡：工具默认折叠、标题只有一行预览、刻意无输入框', () => {
+test('实时摘要卡：正文默认展开、工具默认折叠、标题只有一行预览、刻意无输入框', () => {
     const segments = [{
         text: '先跑一遍测试',
         tools: [
@@ -229,6 +229,10 @@ test('实时摘要卡：工具默认折叠、标题只有一行预览、刻意�
     // 1 个文字段面板 + 2 个工具面板
     assert.equal(panels.length, 3);
 
+    // 正文默认展开、工具默认折叠：一张摘要卡里最该被读到的是 agent 说的话，不是过程
+    assert.equal(panels[0].header.title.content, '❯ Cursor');
+    assert.equal(panels[0].expanded, true);
+
     const toolPanel = panels[1];
     assert.equal(toolPanel.expanded, false);
     assert.equal(toolPanel.header.title.content.includes('\n'), false, '标题必须是单行');
@@ -238,6 +242,25 @@ test('实时摘要卡：工具默认折叠、标题只有一行预览、刻意�
     assert.equal(collect(card.body.elements, 'input').length, 0,
         'Cursor 运行中没有可回流的输入通道，摆输入框会骗人');
     assert.match(footerText(card), /🤖 Cursor/);
+});
+
+test('正文再长也默认展开：长回答恰恰是最需要直接看到的那种', () => {
+    const long = '这是一段很长的结论。'.repeat(80);
+    for (const card of [
+        cards.buildLiveCard({
+            segments: [{ text: long, tools: [] }],
+            capture: { tools: true, output: true, results: true },
+            model: '', projectName: '',
+        }),
+        cards.buildCliTurnCard({
+            segments: [{ text: long, tools: [] }],
+            status: 'running', stateKey: 'k', projectName: '', model: '',
+        }),
+    ]) {
+        const panel = collect(card.body.elements, 'collapsible_panel')[0];
+        assert.equal(panel.header.title.content, '❯ Cursor');
+        assert.equal(panel.expanded, true);
+    }
 });
 
 test('实时摘要卡尊重 capture 开关：只要 tools 时不渲染结果与正文', () => {
