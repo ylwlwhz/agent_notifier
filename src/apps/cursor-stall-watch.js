@@ -99,6 +99,7 @@ function recordActivity(event, { stopped = false } = {}) {
         session_id: event.sessionId,
         project: meta.projectName || '',
         model: meta.model || '',
+        conversation_name: meta.conversationName || '',
         workspace_root: meta.workspaceRoot || '',
     });
 }
@@ -219,6 +220,7 @@ async function sendStallCard(heartbeat, idleMs) {
         idleMs,
         projectName: heartbeat.project || '',
         model: heartbeat.model || '',
+        conversationName: heartbeat.conversation_name || '',
     });
 
     try {

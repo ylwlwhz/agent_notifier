@@ -24,6 +24,7 @@ const { sessionState } = require('../lib/session-state');
 const { decisionBridge, newDecisionId } = require('../lib/decision-bridge');
 const { sharedTmpPath } = require('../lib/tmp-dir');
 const { translateCursorHook } = require('../adapters/cursor/hook-adapter');
+const { conversationName } = require('../adapters/cursor/conversation-name');
 const {
     parseCursorControlConfig,
     shouldAskApproval,
@@ -425,6 +426,7 @@ function liveEnvelope(event) {
         generationId: event.meta.generationId,
         model: event.meta.model,
         projectName: event.meta.projectName,
+        conversationName: event.meta.conversationName,
         ts: Date.now(),
     };
 }
@@ -505,6 +507,8 @@ async function main() {
     if (!config.enabled) return emit({});
 
     const event = translateCursorHook(payload);
+    // 会话名要在这里补：翻译层是纯函数，读 transcript 是 I/O，不该塞进去
+    event.meta.conversationName = conversationName(event);
 
     // 必须在 handler 分流【之前】刷心跳：afterAgentThought 这类事件本仓库不处理
     // （kind=ignore），但它恰恰是「agent 还在思考」的唯一证据，漏掉就会误报卡死

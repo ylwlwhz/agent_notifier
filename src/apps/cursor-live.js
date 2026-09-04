@@ -155,6 +155,7 @@ async function flushBuffer(bufferPath) {
         capture,
         model: last.model || '',
         projectName: last.projectName || '',
+        conversationName: last.conversationName || '',
     });
     const content = JSON.stringify(card);
     const sig = hashStr(JSON.stringify(card.body.elements));

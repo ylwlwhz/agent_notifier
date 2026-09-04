@@ -399,6 +399,11 @@ Cursor output comes straight from the hook payload (`postToolUse` carries `tool_
 In the summary card, the `❯ Cursor` panel holds the agent's own words and is always expanded
 regardless of length; tool steps are always collapsed.
 
+Every Cursor card carries a **conversation name** as its subtitle (same shape as the Claude
+cards) so you can tell parallel conversations apart. Cursor's hook payload has no title field,
+so the name is taken from the first user message in `transcript_path` — the same thing Cursor
+titles a chat from. If it can't be resolved, the subtitle is simply omitted.
+
 A failed tool (`postToolUseFailure`) is just another step in the same summary card — its title
 carries `❌` plus the failure reason, the error message takes the place of the output, and the
 card header gets a red counter. It stays collapsed like every other step; error text is long

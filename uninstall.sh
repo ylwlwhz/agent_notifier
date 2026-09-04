@@ -325,7 +325,7 @@ done
 
 # /tmp 运行时文件
 for pattern in agent-inject-pts claude-pty-output- codex-pty-output- claude-live- codex-live- \
-               cursor-live- cursor-last-response- cursor-steer- \
+               cursor-live- cursor-last-response- cursor-steer- cursor-name- \
                cursor-activity- cursor-stall- cursor-card- cursor-send-card-error.log; do
     for f in /tmp/${pattern}*; do
         if [ -f "$f" ] || [ -p "$f" ]; then
