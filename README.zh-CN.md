@@ -346,6 +346,8 @@ SOUND_ENABLED=true
 三个宿主共用这一套语义。Codex 的输出来自 `~/.codex/sessions/*.jsonl`，Cursor 的直接来自
 hook payload（`postToolUse` 自带 `tool_input` / `tool_output`），都不靠终端文本猜测。
 
+摘要卡里 `❯ Cursor` 那段是 agent 的回话，**默认展开**（不论多长）；工具步骤一律默认折叠。
+
 失败的工具（`postToolUseFailure`）就是这张摘要卡里的一步：标题写 `❌` + 失败原因，把
 error_message 放在「结果」的位置，卡片头上再挂一个红色的失败计数。它和其他步骤一样**默认折叠**
 ——报错正文动辄几十行，自动展开只会把整张摘要撑长。**没有独立的失败卡**——每个失败工具发一张
