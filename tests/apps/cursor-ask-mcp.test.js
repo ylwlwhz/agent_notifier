@@ -52,13 +52,21 @@ function captureRpc() {
     return lines;
 }
 
-/** 起一个真实子进程，喂几行 JSON-RPC，收集 stdout 上的响应 */
+/**
+ * 起一个真实子进程，喂几行 JSON-RPC，收集 stdout 上的响应。
+ *
+ * 归属过滤的两个变量默认置空，好让协议类用例与【跑测试那台机器的 .env】无关：
+ * 内网机的 .env 里配了 `CURSOR_NOTIFY_ROOTS`，而 ssh 起的测试进程没有
+ * `WORKSPACE_FOLDER_PATHS`，于是 fail-closed 生效、`tools/list` 返回空数组
+ * —— 表现是「协议用例莫名失败，本机却全绿」（GY_2 上实测踩过）。
+ * 置空而不是 delete：dotenv 只跳过【已存在】的键，delete 掉会被 .env 重新灌回来。
+ * 需要验归属的用例自己显式传值覆盖（见 OWNER_ENV）。
+ */
 function roundtrip(requests, { timeoutMs = 8000, env = {} } = {}) {
     return new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [SERVER], {
             stdio: ['pipe', 'pipe', 'pipe'],
-            // dotenv 只跳过【已存在】的键，所以显式传空串就能盖住仓库 .env 里的同名项
-            env: { ...process.env, ...env },
+            env: { ...process.env, CURSOR_NOTIFY_ROOTS: '', CURSOR_NOTIFY_USERS: '', ...env },
         });
         let out = '';
         const timer = setTimeout(() => { child.kill(); reject(new Error('子进程超时')); }, timeoutMs);
