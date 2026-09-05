@@ -14,8 +14,17 @@ function loadSetup(mcpFile) {
     return require(modPath);
 }
 
+// 跑完删掉：Linux 的 /tmp 没人清扫，这个 helper 每调一次建一个目录，
+// 内网机上实测攒到了 114 个 an-mcp-*（那是台多人共用的机器）
+const tmpDirs = [];
+test.after(() => {
+    for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function tmpMcpPath() {
-    return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'an-mcp-')), 'mcp.json');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'an-mcp-'));
+    tmpDirs.push(dir);
+    return path.join(dir, 'mcp.json');
 }
 
 const read = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));

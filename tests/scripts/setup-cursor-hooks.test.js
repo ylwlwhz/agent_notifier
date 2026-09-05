@@ -17,8 +17,22 @@ function loadSetup(hooksPath) {
     return require(modPath);
 }
 
+/**
+ * 每个用例一个独立临时目录，跑完统一删掉。
+ *
+ * 必须删：Linux 的 /tmp 没人清扫，而这个 helper 每调一次就建一个目录 —— 内网机上实测
+ * 攒到了 190 个 an-hooks-*（macOS 看不出来，只因为 $TMPDIR 会被系统定期清）。
+ * 那是台多人共用的机器，别拿测试垃圾占着它的 /tmp。
+ */
+const tmpDirs = [];
+test.after(() => {
+    for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+});
+
 function tmpHooksPath(name) {
-    return path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'an-hooks-')), name);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'an-hooks-'));
+    tmpDirs.push(dir);
+    return path.join(dir, name);
 }
 
 /** 用环境变量覆盖策略：readEnvTimeouts 里 process.env 优先于 .env，用例因此与真实 .env 无关 */

@@ -21,6 +21,9 @@ process.env.AGENT_NOTIFIER_DECISIONS = path.join(TMP, 'decisions');
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
+// 跑完删掉：Linux 的 /tmp 没人清扫，每跑一次测试就留一个 cursor-e2e-*（内网机上攒到了 19 个）
+test.after(() => fs.rmSync(TMP, { recursive: true, force: true }));
+
 const { sessionState } = require('../../src/lib/session-state');
 const { decisionBridge } = require('../../src/lib/decision-bridge');
 const { translateCursorHook } = require('../../src/adapters/cursor/hook-adapter');
