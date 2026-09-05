@@ -608,6 +608,47 @@ Codex 的实时摘要规则：
 
 ## 6. 卡片展示约束
 
+### 正文里的图片：不处理会让整张卡发不出去
+
+飞书卡片的 `tag: markdown` 会把 `![alt](src)` 当成**图片语法**解析，而括号里必须是飞书
+自己的 image_key。agent 正文里写的是本机路径，于是**整张卡被拒收**：
+
+```
+Feishu API error 230099: Failed to create card content,
+ext=ErrCode: 200570; ErrMsg: card contains invalid image keys;
+ErrorValue: image key /root/eh/arrow_live_ep2_f300.png
+```
+
+后果不是「图没显示」，而是那张卡压根没发出去，且**不留任何 state 痕迹**（`askFeishu`
+在发卡失败时会回滚通知、关掉决策通道），事后极难定位。GY_2 上 2026-09-05 一天内踩了
+3 次，症状是「有摘要卡、没有完成卡」——而完成卡是人在外面继续这轮对话的唯一入口。
+
+处理分两层（`src/lib/card-images.js`）：
+
+- **`stripImages()` 兜底**，挂在 `parseMarkdownToElements()` 这个唯一入口上，对
+  **三个宿主的所有卡片**生效：拿不到 image_key 的图片引用一律退化成
+  `🖼 **图说** \`路径\`` 纯文本，并把退化原因写上（文件不存在 / 超 10MB / 缺权限…）。
+  `http(s)` 的转成普通链接——飞书的图片语法不认远程地址。**这一层保证故障不会发生。**
+- **`embedImages()` 上传**，让图真的显示出来：hook / MCP 进程就跑在图片所在那台机器上，
+  把文件传到飞书换成 image_key 再换进正文。需要应用有 `im:resource:upload`（或
+  `im:resource`）权限；没权限、文件没了、超大，都只是退化成上面那行文字，绝不影响发卡。
+  已接入：完成卡（`handleFollowup`）、提问卡（`cursor-ask-mcp`）。
+  单卡上传上限 `MAX_IMAGES=5`——hook 是阻塞进程，不能为一屏图让人干等。
+  相对路径按**工作区根**解析，不是 hook 进程的 cwd。
+
+传输层：Lark SDK 原生有 `im.image.create`；axios shim（`FEISHU_FORCE_PROXY=1` 的机器）
+自己补了一份，multipart 是手搓的（只有「几个文本字段 + 一个文件」，手搓能保证 boundary
+与 Content-Length 一定自洽，省掉 axios 各版本对 FormData 处理差异这个不确定性）。
+
+### 交互卡发不出去时要降级重发，别把人丢在外面
+
+`askFeishu` 第一次 `create` 被拒后，会用 `buildCard(stateKey, degraded=true)` 再发一次
+（完成卡把正文过一遍 `toPlainText()`，交互组件一个不少）。两次都失败才算发卡失败。
+理由就是上面那次故障：完成卡是远程续写的唯一入口，宁可少看点排版，也不能没有输入框。
+
+注意 `sent` 与 `messageId` 要分开记：发成功但响应里没带 `message_id` 时卡片其实已经在
+群里了，只是事后 patch 不了 —— 那种情况必须照常等回复，当成失败会更难查。
+
 ### Codex 实时摘要卡
 
 - 纯助手输出卡不显示伪造的“步骤表”

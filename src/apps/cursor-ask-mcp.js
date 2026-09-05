@@ -367,6 +367,18 @@ async function askUser({ question, options = [], context = '', progressToken, re
         text_response: { field: 'answer' },
     });
 
+    // 提问正文里的本机图片传上去换成 image_key —— 「这两张渲染哪个对」这类问题，
+    // 看不到图就没法答。这里不心疼这次上传：本调用接下来要阻塞几十分钟
+    const { embedImages } = require('../lib/card-images');
+    const shown = {};
+    for (const [field, value] of Object.entries({ question, context })) {
+        shown[field] = (await embedImages(value, {
+            client,
+            cwd: process.env.CURSOR_PROJECT_DIR || process.cwd(),
+            log: (msg) => log(msg),
+        })).text;
+    }
+
     let messageId = null;
     try {
         const resp = await client.im.message.create({
@@ -375,7 +387,12 @@ async function askUser({ question, options = [], context = '', progressToken, re
                 receive_id: chatId,
                 msg_type: 'interactive',
                 content: JSON.stringify(cards.buildAskCard({
-                    question, options: list, context, stateKey, timeoutMs: waitMs, projectName,
+                    question: shown.question,
+                    options: list,
+                    context: shown.context,
+                    stateKey,
+                    timeoutMs: waitMs,
+                    projectName,
                 })),
             },
         });
@@ -396,7 +413,8 @@ async function askUser({ question, options = [], context = '', progressToken, re
         stateKey,
         messageId,
         client,
-        question,
+        // 存换好 image_key 的那份：收敛版卡片会重渲染正文，用原始路径会让图在事后消失
+        question: shown.question,
         options: list,
         deadline: Date.now() + waitMs,
         totalMs: waitMs,
