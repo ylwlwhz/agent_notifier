@@ -67,7 +67,9 @@ async function verifyNotifyCards(app) {
     });
     await sendPlainCard(app, cards.buildLiveCard({
         segments: [{
-            text: '先跑一遍测试，然后改一处实现。',
+            // 刻意不给 text：助手正文由紧随其后的完成卡承载，摘要卡里再放一份就是同一段话
+            // 读两遍（afterAgentResponse 只在轮末触发，见 docs/ai_rules.md §4）
+            text: '',
             tools: [
                 { tool: 'Shell', icon: '⚡', input: 'npm test -- --reporter=dot', result: '208 passing' },
                 { tool: 'StrReplace', icon: '✏️', input: 'src/apps/cursor-hook.js', result: '' },
@@ -86,13 +88,13 @@ async function verifyNotifyCards(app) {
         model: live.meta.model,
         projectName,
     }));
-    console.log('  ✔ 实时摘要卡（靛蓝、工具一律默认折叠、失败那步标题带 ❌、无输入框）已发送');
+    console.log('  ✔ 实时摘要卡（靛蓝、纯工具步骤、一律默认折叠、失败那步标题带 ❌、无输入框）已发送');
 
     const stop = makeEvent({ hook_event_name: 'stop', status: 'completed' });
     await sendPlainCard(app, cards.buildFollowupCard({
         event: stop, stateKey: null, body: '任务已完成（纯通知形态，无交互组件）。', timeoutMs: 0, waiting: false,
     }));
-    console.log('  ✔ 完成卡（纯通知形态）已发送');
+    console.log('  ✔ 完成卡（纯通知形态，助手正文只在这张卡上）已发送');
 }
 
 /** 审批卡：真的阻塞等你点，点完打印 Cursor 会收到的裁决 */

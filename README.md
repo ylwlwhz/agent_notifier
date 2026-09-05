@@ -396,8 +396,12 @@ All three hosts share these semantics. Codex output comes from `~/.codex/session
 Cursor output comes straight from the hook payload (`postToolUse` carries `tool_input` and
 `tool_output`). Neither is inferred from terminal text.
 
-In the summary card, the `❯ Cursor` panel holds the agent's own words and is always expanded
-regardless of length; tool steps are always collapsed.
+Cursor treats `output` with one exception: the agent's own words appear **only on the completion
+card**, never duplicated into the summary card. Cursor's `afterAgentResponse` fires once per turn,
+at the very end, so whatever the summary card showed there was always identical to the completion
+card that arrived moments later — the same paragraph, read twice. Only with `CURSOR_NOTIFY_STOP`
+off (no completion card at all) does the summary card carry it, in a `❯ Cursor` panel that is
+always expanded regardless of length. Tool steps are always collapsed.
 
 > **On a machine where several people share one OS account, set `CURSOR_NOTIFY_ROOTS` first.**
 > Both `~/.cursor/hooks.json` and `~/.cursor/mcp.json` are user-level, so a colleague's Cursor

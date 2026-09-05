@@ -346,7 +346,10 @@ SOUND_ENABLED=true
 三个宿主共用这一套语义。Codex 的输出来自 `~/.codex/sessions/*.jsonl`，Cursor 的直接来自
 hook payload（`postToolUse` 自带 `tool_input` / `tool_output`），都不靠终端文本猜测。
 
-摘要卡里 `❯ Cursor` 那段是 agent 的回话，**默认展开**（不论多长）；工具步骤一律默认折叠。
+Cursor 的 `output` 有个例外：agent 的回话**只出现在完成卡上**，摘要卡里不再放一份。Cursor 的
+`afterAgentResponse` 每轮只在轮末触发一次，所以摘要卡那段正文永远就是紧随其后那张完成卡的
+正文，两张卡前后脚发出、同一段话读两遍。只有把 `CURSOR_NOTIFY_STOP` 关掉（压根不要完成卡）
+时，才由摘要卡兜住它，此时那个 `❯ Cursor` 面板**默认展开**（不论多长）。工具步骤一律默认折叠。
 
 > **多人共用一个账号的机器要先配 `CURSOR_NOTIFY_ROOTS`。** `~/.cursor/hooks.json` 与
 > `~/.cursor/mcp.json` 都是用户级的，同事的 Cursor 会话会一起触发本仓库：卡片发进你的飞书群，
