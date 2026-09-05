@@ -432,9 +432,23 @@ function liveEnvelope(event) {
     };
 }
 
+/**
+ * 助手正文。它有两个可能的落点，而【同时落两处就是把同一段话读两遍】：
+ * 完成卡的正文（recordLastResponse → handleFollowup 的 body）与摘要卡的 `❯ Cursor` 面板。
+ *
+ * 关键实测：`afterAgentResponse` 每轮只触发一次，且就在轮末 —— GY_2 上 9 轮真实数据的
+ * 条目形状清一色是 `ttttT`，连 27 次工具调用的长轮次里也只有结尾那一条正文。所以摘要卡
+ * 里那段正文【永远】就是紧随其后那张完成卡的正文，两张卡前后脚发出，内容完全重复。
+ *
+ * 于是只在压根不会有完成卡时才让摘要卡兜住它：`notifyStop` 为真时 handleFollowup 必定发卡
+ * （waiting 就是交互卡，否则是纯通知卡），两者都带 body；假时两张卡都没有，正文就无处可看。
+ *
+ * 这也顺带解决了「纯回话轮次」——那种轮次只有一条正文、没有工具，摘要卡整张就是完成卡的
+ * 副本；不收正文之后它连卡都不会发（cursor-live 的 hasContent 判据）。
+ */
 function handleResponse(event, config) {
     recordLastResponse(event.sessionKey, event.message);
-    if (config.liveCapture?.output && event.message) {
+    if (config.liveCapture?.output && event.message && !config.notifyStop) {
         appendLive(event.sessionKey, { type: 'text', text: event.message, ...liveEnvelope(event) });
     }
     return {};

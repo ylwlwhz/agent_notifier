@@ -577,7 +577,7 @@ test('同一条 payload 换成自己的工作区：痕迹照旧产生（证明�
 // ── postToolUseFailure：失败并进摘要卡，不再单独发红卡 ────────────────────────
 
 /** 落盘但不真的 flush：flush 子进程会去发飞书卡片，测试里不能让它跑起来 */
-function captureLiveEntries(t, event, config) {
+function captureLiveEntries(t, event, config, handler = cursorHook.handleLive) {
     const cp = require('child_process');
     const origSpawn = cp.spawn;
     cp.spawn = () => ({ unref() {} });
@@ -587,7 +587,7 @@ function captureLiveEntries(t, event, config) {
         try { fs.unlinkSync(buffer); } catch { /* 本来就没写成 */ }
     });
 
-    cursorHook.handleLive(event, config);
+    handler(event, config);
     if (!fs.existsSync(buffer)) return [];
     return fs.readFileSync(buffer, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
 }
@@ -634,6 +634,62 @@ test('成功的工具不带失败标记', (t) => {
 
     assert.equal(entries.length, 1);
     assert.equal(entries[0].failed, undefined);
+});
+
+// ── 助手正文只落一处：完成卡带了它，摘要卡就别再放一份 ────────────────────────
+//
+// afterAgentResponse 每轮只在轮末触发一次，所以摘要卡里那段正文永远就是紧随其后那张
+// 完成卡的正文 —— 两张卡前后脚发出，同一段话读两遍。
+
+function responseEvent(conversationId, text) {
+    return translateCursorHook({
+        hook_event_name: 'afterAgentResponse',
+        conversation_id: conversationId,
+        text,
+    });
+}
+
+/** 正文缓存是给完成卡用的，测完要清掉，别串到别的用例 */
+function forgetLastResponse(t, sessionKey) {
+    t.after(() => { try { fs.unlinkSync(cursorHook.lastResponsePath(sessionKey)); } catch { /* 没写成 */ } });
+}
+
+test('会发完成卡时，摘要卡不再收同一段正文', (t) => {
+    const event = responseEvent('conv-body-000001', '已改完三处，测试全绿。');
+    forgetLastResponse(t, event.sessionKey);
+
+    const entries = captureLiveEntries(t, event, {
+        notifyStop: true,
+        liveCapture: { tools: true, output: true, results: true },
+    }, cursorHook.handleResponse);
+
+    assert.deepEqual(entries, [], '完成卡会原样带上这段话，摘要卡再放一份就是重复');
+    // 正文没丢，只是换了落点：完成卡从这里取 body
+    assert.equal(cursorHook.consumeLastResponse(event.sessionKey), '已改完三处，测试全绿。');
+});
+
+test('关掉完成卡后，摘要卡必须兜住正文，否则这段话哪儿都看不到', (t) => {
+    const event = responseEvent('conv-body-000002', '已改完三处，测试全绿。');
+    forgetLastResponse(t, event.sessionKey);
+
+    const entries = captureLiveEntries(t, event, {
+        notifyStop: false,
+        liveCapture: { tools: true, output: true, results: true },
+    }, cursorHook.handleResponse);
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].type, 'text');
+    assert.equal(entries[0].text, '已改完三处，测试全绿。');
+});
+
+test('capture.output 关着时，即便没有完成卡也不收正文', (t) => {
+    const event = responseEvent('conv-body-000003', '一段话');
+    forgetLastResponse(t, event.sessionKey);
+
+    assert.deepEqual(captureLiveEntries(t, event, {
+        notifyStop: false,
+        liveCapture: { tools: true, output: false, results: true },
+    }, cursorHook.handleResponse), []);
 });
 
 // ── 心跳：只在「说完话」之后武装看门狗 ────────────────────────────────────────
