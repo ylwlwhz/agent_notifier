@@ -39,11 +39,44 @@ test('默认用 Lark SDK；FEISHU_FORCE_PROXY=1 换成 axios shim', () => {
     assert.deepEqual(Object.keys(shim), ['im']);
 });
 
-test('shim 覆盖了代码库实际用到的三个方法', () => {
+test('shim 覆盖了代码库实际用到的方法', () => {
     const shim = withForceProxy('1', () => createLarkHttpClient(CREDS));
     assert.equal(typeof shim.im.message.create, 'function');
     assert.equal(typeof shim.im.message.patch, 'function'); // 卡片收敛 / live patch
     assert.equal(typeof shim.im.chat.list, 'function');     // resolve-chat-id 兜底找群
+    // 正文里的本机图片要传上去换 image_key，否则整张卡会被飞书拒收（见 card-images.js）。
+    // SDK 原生就有 im.image.create，shim 得自己补 —— 漏了它，必须走代理的机器上图片全丢
+    assert.equal(typeof shim.im.image.create, 'function');
+});
+
+// ── 上传用的 multipart：手搓的，boundary 与长度必须自洽 ──────────────────────
+
+const { buildMultipart, streamToBuffer } = require('../../src/channels/feishu/axios-lark-client');
+
+test('multipart 的 boundary、字段与结束标记自洽', () => {
+    const { body, contentType } = buildMultipart(
+        { image_type: 'message' },
+        { field: 'image', name: 'a.png', type: 'image/png', buffer: Buffer.from([1, 2, 3]) }
+    );
+    const boundary = /boundary=(.+)$/.exec(contentType)[1];
+    const text = body.toString('latin1');
+
+    assert.match(text, new RegExp(`^--${boundary}\r\n`), '必须以 boundary 开头');
+    assert.ok(text.endsWith(`\r\n--${boundary}--\r\n`), '缺结束标记飞书会判为不完整请求');
+    assert.match(text, /name="image_type"\r\n\r\nmessage\r\n/);
+    assert.match(text, /name="image"; filename="a.png"\r\nContent-Type: image\/png/);
+    // 二进制原样嵌入，不能被当字符串转码
+    assert.ok(body.includes(Buffer.from([1, 2, 3])));
+});
+
+test('streamToBuffer 读得出完整内容（shim 拿到的是流，要先读成 Buffer 才知道长度）', async () => {
+    const file = path.join(os.tmpdir(), `an-mp-${process.pid}.bin`);
+    fs.writeFileSync(file, Buffer.from([9, 8, 7, 6]));
+    try {
+        assert.deepEqual([...await streamToBuffer(fs.createReadStream(file))], [9, 8, 7, 6]);
+    } finally {
+        try { fs.unlinkSync(file); } catch { /* 忽略 */ }
+    }
 });
 
 test('缺凭据时明确报错，不返回一个用不了的 client', () => {

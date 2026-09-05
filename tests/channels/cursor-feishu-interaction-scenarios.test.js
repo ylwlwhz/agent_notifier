@@ -383,6 +383,112 @@ test('卡片发不出去时绝不阻塞：立刻返回 null 并清掉通知', as
     assert.deepEqual(leftover, [], '发卡失败应回滚通知，不留孤儿');
 });
 
+// ── 完成卡永不丢：内容被飞书拒收就降级重发 ────────────────────────────────────
+//
+// 真实故障（GY_2，2026-09-05）：agent 正文里一句 `![图](/root/eh/x.png)` 让整张完成卡被拒
+// （230099 card contains invalid image keys），而那是人在外面继续这轮对话的唯一入口。
+// 现在图片会先被清洗/上传，这里再加一道：万一还有别的拒收原因，也要把卡送出去。
+
+/** 第一次 create 抛错、第二次成功的假 client */
+function pickyApp(reject = new Error('Feishu API error 230099: card contains invalid image keys')) {
+    const sent = [];
+    return {
+        sent,
+        chatId: 'chat-x',
+        client: {
+            im: {
+                message: {
+                    create: async ({ data }) => {
+                        sent.push(JSON.parse(data.content));
+                        if (sent.length === 1) throw reject;
+                        return { data: { message_id: 'm-degraded' } };
+                    },
+                    patch: async () => ({}),
+                },
+            },
+        },
+    };
+}
+
+test('卡片被拒收时降级重发，且交互组件必须还在（否则人就彻底失联了）', async () => {
+    const event = translateCursorHook(stopFixture);
+    const app = pickyApp();
+
+    const decision = await cursorHook.askFeishu({
+        event,
+        app,
+        timeoutMs: 150,
+        responses: cards.followupResponses(),
+        textResponse: { field: 'followup_message' },
+        notificationType: 'cursor_stop_followup',
+        buildCard: (key, degraded) => cards.buildFollowupCard({
+            event,
+            stateKey: key,
+            body: degraded ? '降级正文' : '原始正文',
+            timeoutMs: 150,
+            waiting: true,
+        }),
+    });
+
+    assert.equal(app.sent.length, 2, '第一次被拒后必须再试一次，而不是放弃');
+    assert.match(JSON.stringify(app.sent[0]), /原始正文/);
+    const retried = JSON.stringify(app.sent[1]);
+    assert.match(retried, /降级正文/, '重发要用降级形态，否则同样的内容还会被拒');
+    assert.match(retried, /"tag":"input"/, '输入框必须保住 —— 它是远程续写的唯一入口');
+    // 卡送出去了，就该照常等回复（这里用短超时，拿到 null 即证明它真的等过）
+    assert.equal(decision, null);
+});
+
+test('降级卡也发不出去时才放弃，并回滚通知不留孤儿', async () => {
+    const event = translateCursorHook(stopFixture);
+    const app = {
+        chatId: 'chat-x',
+        client: { im: { message: { create: async () => { throw new Error('feishu down'); }, patch: async () => ({}) } } },
+    };
+
+    const decision = await cursorHook.askFeishu({
+        event,
+        app,
+        timeoutMs: 60000,
+        responses: cards.followupResponses(),
+        notificationType: 'cursor_stop_followup',
+        buildCard: (key, degraded) => cards.buildFollowupCard({
+            event, stateKey: key, body: degraded ? 'b' : 'a', timeoutMs: 60000, waiting: true,
+        }),
+    });
+
+    assert.equal(decision, null);
+    sessionState.load();
+    const leftover = Object.keys(sessionState.data)
+        .filter((k) => k.startsWith(`feishu_cursor_${event.sessionKey}`));
+    assert.deepEqual(leftover, [], '两次都失败才算发卡失败，通知要回滚');
+});
+
+test('发成功但响应没带 message_id：卡片已在群里，必须照常等回复', async () => {
+    // 早期改动里这里被当成「发卡失败」直接返回 null —— 卡片明明发出去了，
+    // 人回了话却没人接，比不发卡更难查
+    const event = translateCursorHook(stopFixture);
+    const app = {
+        chatId: 'chat-x',
+        client: { im: { message: { create: async () => ({ data: {} }), patch: async () => ({}) } } },
+    };
+
+    const started = Date.now();
+    const decision = await cursorHook.askFeishu({
+        event,
+        app,
+        timeoutMs: 200,
+        responses: cards.followupResponses(),
+        notificationType: 'cursor_stop_followup',
+        buildCard: (key) => cards.buildFollowupCard({
+            event, stateKey: key, body: 'x', timeoutMs: 200, waiting: true,
+        }),
+    });
+
+    assert.equal(decision, null);
+    assert.ok(Date.now() - started >= 150, '必须真的等过，而不是立刻当失败返回');
+});
+
 // ── 裁决 → 收敛卡文案 ───────────────────────────────────────────────────────
 
 test('describeDecision 按裁决给出对应的收敛文案与配色', () => {

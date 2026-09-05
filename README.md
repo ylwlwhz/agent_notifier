@@ -414,6 +414,16 @@ cards) so you can tell parallel conversations apart. Cursor's hook payload has n
 so the name is taken from the first user message in `transcript_path` — the same thing Cursor
 titles a chat from. If it can't be resolved, the subtitle is simply omitted.
 
+**Images in the agent's text**: an `![caption](/path/to/x.png)` gets uploaded to Feishu so you
+can actually see it on your phone (needs the `im:resource:upload` scope). When it can't be
+uploaded it degrades to a one-line `🖼 caption + path` reference stating why (missing file, over
+10 MB, missing scope). This is not cosmetic: Feishu parses `![]()` as image syntax and the
+parenthesised value must be one of its own image keys, so leaving a local path in there gets the
+**entire card rejected** — the failure we hit looked like "summary card arrived, completion card
+never did", and the completion card is the only way to keep the conversation going remotely. At
+most 5 images per card (the hook is blocking; nobody should wait on a screenful of uploads), and
+relative paths resolve against the workspace root.
+
 A failed tool (`postToolUseFailure`) is just another step in the same summary card — its title
 carries `❌` plus the failure reason, the error message takes the place of the output, and the
 card header gets a red counter. It stays collapsed like every other step; error text is long
@@ -524,6 +534,9 @@ No public IP or domain needed.
 - `im:message`
 - `im:message:send_as_bot`
 - `im:chat:readonly`
+- `im:resource:upload` (optional) — lets local images in the agent's own text get uploaded to
+  Feishu so you actually see them on your phone. Without it everything still works: each image
+  degrades to a one-line `🖼 caption + path` reference and the card is delivered as usual.
 
 ### 7. Publish the App
 After publishing, add the bot to your target group chat.

@@ -1,15 +1,25 @@
 'use strict';
 
+const { stripImages } = require('./card-images');
+
 /**
  * 解析 markdown 内容，将表格块转换为飞书原生 table 元素
  * 飞书卡片的 tag:'markdown' 不支持渲染 markdown 表格，需要转换
+ *
+ * 同时在这里做**图片兜底**：飞书把 `![alt](src)` 当图片语法解析，src 必须是它自己的
+ * image_key，否则**整张卡被拒收**（`230099 ... card contains invalid image keys`）。
+ * agent 正文里写的是本机路径，所以拿不到 key 的一律退化成纯文本引用。放在这个唯一入口
+ * 上，三个宿主的所有卡片一次性都拦住了；想真正显示图片的链路自己先调 embedImages()
+ * 换成 image_key，那种 src 会被原样留下（见 card-images.js）。
+ *
  * @param {string} content
  * @returns {Array} 飞书卡片元素数组
  */
 function parseMarkdownToElements(content) {
     if (!content) return [];
 
-    const lines = content.split('\n');
+    const safe = stripImages(content);
+    const lines = safe.split('\n');
     const elements = [];
     const textLines = [];
     let i = 0;
@@ -49,7 +59,8 @@ function parseMarkdownToElements(content) {
     }
 
     flushText();
-    return elements.length > 0 ? elements : [{ tag: 'markdown', content: content }];
+    // 兜底也要用清洗过的正文：漏一处未清洗的图片语法，整张卡就发不出去
+    return elements.length > 0 ? elements : [{ tag: 'markdown', content: safe }];
 }
 
 /**

@@ -37,6 +37,7 @@ const {
 } = require('../adapters/cursor/control-policy');
 const stallWatch = require('./cursor-stall-watch');
 const cards = require('./cursor-cards');
+const { embedImages, hasLocalImages, toPlainText } = require('../lib/card-images');
 const { resolveFeishuChatId } = require('../channels/feishu/resolve-chat-id');
 
 // ── stdin / stdout ───────────────────────────────────────────────────────────
@@ -131,6 +132,24 @@ function sendCardDetached(card) {
         console.error('[cursor-hook] 无法启动发卡子进程:', err.message);
         return false;
     }
+}
+
+/**
+ * 正文里的本机图片 → 飞书 image_key。
+ *
+ * 相对路径按会话的工作区根解析：agent 常写 `![图](docs/images/x.png)` 这种仓库内相对路径，
+ * 而 hook 进程的 cwd 是 Cursor 给的，未必是工作区根。
+ */
+async function embedCardImages(body, app, event) {
+    const { text, uploaded, degraded } = await embedImages(body, {
+        client: app.client,
+        cwd: event.meta.workspaceRoot || event.meta.cwd || process.cwd(),
+        log: (msg) => console.error(`[cursor-hook] ${msg}`),
+    });
+    if (uploaded || degraded) {
+        console.error(`[cursor-hook] 正文图片：已上传 ${uploaded} 张，退化为文本 ${degraded} 张`);
+    }
+    return text;
 }
 
 async function patchCard(app, messageId, card) {
@@ -247,11 +266,28 @@ async function askFeishu({ event, app, buildCard, buildSettled, responses, textR
     };
     sessionState.addNotification(stateKey, notification);
 
+    // sent 与 messageId 要分开记：发成功但响应里没带 message_id 时，卡片其实已经在群里了，
+    // 只是事后 patch 不了 —— 那种情况必须照常等回复，不能当成发卡失败把人挡回去
     let messageId = null;
+    let sent = false;
     try {
-        messageId = await sendCard(app, buildCard(stateKey));
+        messageId = await sendCard(app, buildCard(stateKey, false));
+        sent = true;
     } catch (err) {
         console.error('[cursor-hook] 发送卡片失败:', err.message);
+        // 内容被飞书拒收时退化重发一次：正文降级成纯文本，交互组件一个不少。
+        // 实测过一次代价极高的丢卡：agent 正文里一句 `![图](/root/eh/x.png)` 让整张完成卡
+        // 被拒（230099 card contains invalid image keys），而完成卡是人在外面继续这轮
+        // 对话的唯一入口 —— 宁可少看点排版，也不能没有输入框。
+        try {
+            messageId = await sendCard(app, buildCard(stateKey, true));
+            sent = true;
+            console.error('[cursor-hook] 已改用降级卡重发成功');
+        } catch (retryErr) {
+            console.error('[cursor-hook] 降级卡也发不出去:', retryErr.message);
+        }
+    }
+    if (!sent) {
         // 卡片没发出去 = 没人能作答，绝不能在这里阻塞
         sessionState.removeNotification(stateKey);
         decisionBridge.close(decisionId);
@@ -385,12 +421,19 @@ async function handleFollowup(event, config) {
     const waiting = shouldWaitFollowup(config, event);
     if (!waiting && !config.notifyStop) return {};
 
-    const body = event.meta.isSubagent
+    const rawBody = event.meta.isSubagent
         ? event.message
         : (consumeLastResponse(event.sessionKey) || event.message);
 
     if (!waiting) {
-        // 纯通知：不放交互组件，交给 detached 子进程发，不让 Cursor 为一次网络往返干等
+        // 纯通知：不放交互组件，交给 detached 子进程发，不让 Cursor 为一次网络往返干等。
+        // 但图片得在这里传 —— 子进程收到的是【已经建好的卡】，那时路径早被清洗成文本了。
+        // 只有正文真的带本机图片才付这笔钱（远程机上加载传输层就要 6s），否则保持快路径
+        let body = rawBody;
+        if (hasLocalImages(rawBody)) {
+            const app = await getFeishuApp();
+            if (app) body = await embedCardImages(rawBody, app, event);
+        }
         sendCardDetached(cards.buildFollowupCard({
             event, stateKey: null, body, timeoutMs: 0, waiting: false,
         }));
@@ -400,6 +443,10 @@ async function handleFollowup(event, config) {
     const app = await getFeishuApp();
     if (!app) return {};
 
+    // agent 正文里的本机图片：hook 就跑在图片所在这台机器上，传上去换成 image_key，
+    // 手机上才看得到图。传不了会退化成一行文字（见 card-images.js），不影响发卡
+    const body = await embedCardImages(rawBody, app, event);
+
     const timeoutMs = config.followup.timeoutMs;
     const decision = await askFeishu({
         event,
@@ -408,11 +455,12 @@ async function handleFollowup(event, config) {
         responses: cards.followupResponses(),
         textResponse: { field: 'followup_message' },
         notificationType: event.meta.isSubagent ? 'cursor_subagent_followup' : 'cursor_stop_followup',
-        buildCard: (stateKey) => cards.buildFollowupCard({
-            event, stateKey, body, timeoutMs, waiting: true,
+        buildCard: (stateKey, degraded) => cards.buildFollowupCard({
+            event, stateKey, body: degraded ? toPlainText(body) : body, timeoutMs, waiting: true,
         }),
         // 收敛时保留助手正文、沿用任务本身的配色：任务成功就该一直是绿的，
-        // 不能因为「你回了一句话」或「点了结束本轮」就刷成一张灰色空卡
+        // 不能因为「你回了一句话」或「点了结束本轮」就刷成一张灰色空卡。
+        // body 里的 image_key 已经换好，收敛版沿用同一份，图不会在 patch 后消失
         buildSettled: (settled) => cards.buildSettledFollowupCard({
             event, body, statusText: settled.text,
         }),
